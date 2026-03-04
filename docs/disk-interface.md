@@ -42,6 +42,7 @@ type DiskUsageProvider interface {
 - 从 `/proc/mounts` 读取挂载信息
 - 对每个挂载点调用 `syscall.Statfs` 获取容量统计
 - 返回值为可直接渲染和业务消费的预计算结果
+- 默认会排除系统类挂载（如 `/dev/loop*`、`squashfs`、`/snap/`）
 
 ## 默认实现
 
@@ -63,3 +64,4 @@ type DiskUsageProvider interface {
 - 接口扩展：新增能力时优先新增并行接口（如过滤、分页、附加统计），不直接破坏 `ListDiskUsage()` 签名
 - 实现扩展：如需支持其他数据源，可新增 provider 实现并复用 `DiskUsageProvider` 接口
 - 阈值扩展：告警阈值已在代码中独立常量化，后续可平滑改为配置项或命令行参数
+- 过滤扩展：可在 `excludedDeviceBasePrefixes`、`excludedFSTypes`、`excludedMountPointPrefixes` 中按环境增减规则

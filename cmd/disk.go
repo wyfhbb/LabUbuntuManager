@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -15,6 +16,18 @@ import (
 
 const bytesPerGB = 1024 * 1024 * 1024
 const defaultDiskUsageWarnPercent = 80.0
+
+var excludedDeviceBasePrefixes = []string{
+	"loop", // snap 等系统镜像常见设备
+}
+
+var excludedFSTypes = map[string]struct{}{
+	"squashfs": {}, // snap 挂载常见文件系统
+}
+
+var excludedMountPointPrefixes = []string{
+	"/snap/", // snap 包挂载目录
+}
 
 // DiskUsage 表示单个真实磁盘挂载点的容量数据。
 //
@@ -84,16 +97,16 @@ func parseDiskUsageFromMounts(r io.Reader) ([]DiskUsage, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
+		if len(fields) < 3 {
 			continue
 		}
 
 		device := fields[0]
-		if !strings.HasPrefix(device, "/dev/") {
+		mountPoint := decodeProcMountField(fields[1])
+		fsType := fields[2]
+		if !shouldIncludeMount(device, mountPoint, fsType) {
 			continue
 		}
-
-		mountPoint := decodeProcMountField(fields[1])
 
 		var stat syscall.Statfs_t
 		if err := syscall.Statfs(mountPoint, &stat); err != nil {
@@ -124,6 +137,31 @@ func parseDiskUsageFromMounts(r io.Reader) ([]DiskUsage, error) {
 	}
 
 	return usages, nil
+}
+
+func shouldIncludeMount(device, mountPoint, fsType string) bool {
+	if !strings.HasPrefix(device, "/dev/") {
+		return false
+	}
+
+	deviceBase := filepath.Base(device)
+	for _, prefix := range excludedDeviceBasePrefixes {
+		if strings.HasPrefix(deviceBase, prefix) {
+			return false
+		}
+	}
+
+	if _, excluded := excludedFSTypes[fsType]; excluded {
+		return false
+	}
+
+	for _, prefix := range excludedMountPointPrefixes {
+		if strings.HasPrefix(mountPoint, prefix) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func decodeProcMountField(raw string) string {
