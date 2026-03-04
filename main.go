@@ -1,17 +1,14 @@
 package main
 
 import (
-	"github.com/spf13/cobra"
+	"fmt"
 	"os"
+	"server-mgr/cmd"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "server-mgr",
-	Short: "Ubuntu 服务器管理工具",
-}
-
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 }
