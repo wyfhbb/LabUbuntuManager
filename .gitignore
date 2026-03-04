@@ -1,0 +1,22 @@
+# 编译产物
+server-mgr
+*.exe
+
+# 依赖缓存
+vendor/
+
+# nix/direnv
+.direnv/
+.envrc.local
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 测试覆盖率
+*.out
+coverage.html
