@@ -16,6 +16,8 @@ import (
 
 const bytesPerGB = 1024 * 1024 * 1024
 const defaultDiskUsageWarnPercent = 80.0
+const gbPerTB = 1024.0
+const mbPerGB = 1024.0
 
 var excludedDeviceBasePrefixes = []string{
 	"loop", // snap 等系统镜像常见设备
@@ -188,12 +190,12 @@ func renderDiskUsageTable(w io.Writer, usages []DiskUsage) error {
 
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%.2f GB\t%.2f GB\t%.2f GB\t%.2f%%%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%.2f%%%s\n",
 			usage.Device,
 			usage.MountPoint,
-			usage.TotalGB,
-			usage.UsedGB,
-			usage.FreeGB,
+			formatCapacityByGB(usage.TotalGB),
+			formatCapacityByGB(usage.UsedGB),
+			formatCapacityByGB(usage.FreeGB),
 			usage.UsedPercent,
 			warn,
 		); err != nil {
@@ -202,6 +204,17 @@ func renderDiskUsageTable(w io.Writer, usages []DiskUsage) error {
 	}
 
 	return tw.Flush()
+}
+
+func formatCapacityByGB(valueGB float64) string {
+	switch {
+	case valueGB >= gbPerTB:
+		return fmt.Sprintf("%.2f TB", valueGB/gbPerTB)
+	case valueGB < 1:
+		return fmt.Sprintf("%.2f MB", valueGB*mbPerGB)
+	default:
+		return fmt.Sprintf("%.2f GB", valueGB)
+	}
 }
 
 var diskCmd = &cobra.Command{
