@@ -17,6 +17,7 @@
               gopls        # LSP
               gotools      # goimports 等
               delve        # 调试器
+              gnumake
             ];
 
             shellHook = ''
