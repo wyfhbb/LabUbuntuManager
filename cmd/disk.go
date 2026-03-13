@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -15,6 +16,7 @@ import (
 )
 
 const bytesPerGB = 1024 * 1024 * 1024
+const bytesPerSector = 512
 const defaultDiskUsageWarnPercent = 80.0
 const gbPerTB = 1024.0
 const mbPerGB = 1024.0
@@ -31,17 +33,7 @@ var excludedMountPointPrefixes = []string{
 	"/snap/", // snap 包挂载目录
 }
 
-// DiskUsage 表示单个真实磁盘挂载点的容量数据。
-//
-// 字段约定（面向后续高频查询）：
-//   - Device: 设备路径，预期前缀为 "/dev/"。
-//   - MountPoint: 挂载点路径（来自 /proc/mounts）。
-//   - TotalGB: 总容量，单位 GB（1024 进制）。
-//   - UsedGB: 已使用容量，单位 GB。
-//   - FreeGB: 剩余容量，单位 GB。
-//   - UsedPercent: 使用率百分比。
-//
-// 扩展建议：后续新增统计字段时，优先追加字段并保持现有字段语义不变。
+// DiskUsage 表示单个挂载点的容量数据。
 type DiskUsage struct {
 	Device      string
 	MountPoint  string
@@ -51,11 +43,17 @@ type DiskUsage struct {
 	UsedPercent float64
 }
 
+// PhysicalDisk 表示一块物理硬盘及其所有已挂载分区。
+//
+// TotalGB 来自 /sys/block/<disk>/size（内核直接暴露的扇区数），
+// 为 0 表示读取失败（不影响分区容量展示）。
+type PhysicalDisk struct {
+	Name       string     // 物理盘路径，如 /dev/sda
+	TotalGB    float64    // 物理容量，0 表示未知
+	Partitions []DiskUsage
+}
+
 // DiskUsageProvider 定义磁盘占用查询接口。
-//
-// ListDiskUsage 返回所有设备路径以 "/dev/" 开头的挂载点容量信息。
-//
-// 扩展建议：若后续需要分页、过滤或附加统计，可新增并行接口，避免破坏当前签名。
 type DiskUsageProvider interface {
 	ListDiskUsage() ([]DiskUsage, error)
 }
@@ -65,16 +63,10 @@ type ProcMountDiskUsageProvider struct {
 	mountsPath string
 }
 
-// NewProcMountDiskUsageProvider 创建默认查询实现。
-//
-// 当前默认挂载信息来源为 /proc/mounts，后续可通过新增构造函数扩展数据源。
 func NewProcMountDiskUsageProvider() *ProcMountDiskUsageProvider {
-	return &ProcMountDiskUsageProvider{
-		mountsPath: "/proc/mounts",
-	}
+	return &ProcMountDiskUsageProvider{mountsPath: "/proc/mounts"}
 }
 
-// ListDiskUsage 实现 DiskUsageProvider。
 func (p *ProcMountDiskUsageProvider) ListDiskUsage() ([]DiskUsage, error) {
 	file, err := os.Open(p.mountsPath)
 	if err != nil {
@@ -141,6 +133,114 @@ func parseDiskUsageFromMounts(r io.Reader) ([]DiskUsage, error) {
 	return usages, nil
 }
 
+// physicalDiskName 从分区设备路径推断物理盘路径。
+//
+// 规则：
+//   - sda1, sdb2   → /dev/sda, /dev/sdb
+//   - nvme0n1p1    → /dev/nvme0n1
+//   - mmcblk0p1    → /dev/mmcblk0
+//   - sda（整盘）  → /dev/sda（原样返回）
+func physicalDiskName(device string) string {
+	base := filepath.Base(device)
+
+	// 先去掉末尾数字
+	i := len(base)
+	for i > 0 && base[i-1] >= '0' && base[i-1] <= '9' {
+		i--
+	}
+	stripped := base[:i]
+
+	// nvme/mmcblk 等命名：末尾为 'p' 且 'p' 前一位是数字，则再去掉 'p'
+	if len(stripped) > 1 &&
+		stripped[len(stripped)-1] == 'p' &&
+		stripped[len(stripped)-2] >= '0' && stripped[len(stripped)-2] <= '9' {
+		stripped = stripped[:len(stripped)-1]
+	}
+
+	if stripped == "" {
+		stripped = base // 解析失败则原样保留
+	}
+	return "/dev/" + stripped
+}
+
+// readPhysicalDiskSizeGB 从 /sys/block/<disk>/size 读取物理磁盘总容量（GB）。
+// 读取失败返回 0，不影响其他展示逻辑。
+func readPhysicalDiskSizeGB(physDev string) float64 {
+	diskName := filepath.Base(physDev)
+	data, err := os.ReadFile("/sys/block/" + diskName + "/size")
+	if err != nil {
+		return 0
+	}
+	sectors, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil || sectors <= 0 {
+		return 0
+	}
+	return float64(sectors) * bytesPerSector / bytesPerGB
+}
+
+// groupByPhysicalDisk 将挂载点列表按物理磁盘分组，每组内按挂载点排序。
+// 返回结果按物理盘名升序排列。
+func groupByPhysicalDisk(usages []DiskUsage) []PhysicalDisk {
+	indexMap := map[string]int{} // physDev → index in result
+	var result []PhysicalDisk
+
+	for _, u := range usages {
+		physDev := physicalDiskName(u.Device)
+		idx, exists := indexMap[physDev]
+		if !exists {
+			idx = len(result)
+			indexMap[physDev] = idx
+			result = append(result, PhysicalDisk{
+				Name:    physDev,
+				TotalGB: readPhysicalDiskSizeGB(physDev),
+			})
+		}
+		result[idx].Partitions = append(result[idx].Partitions, u)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func renderPhysicalDisks(w io.Writer, disks []PhysicalDisk) error {
+	for i, disk := range disks {
+		// 物理盘标题行
+		if disk.TotalGB > 0 {
+			fmt.Fprintf(w, "● %s  [%s 物理容量]\n", disk.Name, formatCapacityByGB(disk.TotalGB))
+		} else {
+			fmt.Fprintf(w, "● %s\n", disk.Name)
+		}
+
+		// 分区明细表，缩进两格
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		for _, p := range disk.Partitions {
+			warn := ""
+			if p.UsedPercent > defaultDiskUsageWarnPercent {
+				warn = " [!]"
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t总 %s\t已用 %s\t剩 %s\t%.1f%%%s\n",
+				p.Device,
+				p.MountPoint,
+				formatCapacityByGB(p.TotalGB),
+				formatCapacityByGB(p.UsedGB),
+				formatCapacityByGB(p.FreeGB),
+				p.UsedPercent,
+				warn,
+			)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+
+		if i < len(disks)-1 {
+			fmt.Fprintln(w)
+		}
+	}
+	return nil
+}
+
 func shouldIncludeMount(device, mountPoint, fsType string) bool {
 	if !strings.HasPrefix(device, "/dev/") {
 		return false
@@ -176,36 +276,6 @@ func decodeProcMountField(raw string) string {
 	return replacer.Replace(raw)
 }
 
-func renderDiskUsageTable(w io.Writer, usages []DiskUsage) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "设备\t挂载点\t总量\t已用\t剩余\t使用率"); err != nil {
-		return err
-	}
-
-	for _, usage := range usages {
-		warn := ""
-		if usage.UsedPercent > defaultDiskUsageWarnPercent {
-			warn = " [!]"
-		}
-
-		if _, err := fmt.Fprintf(
-			tw,
-			"%s\t%s\t%s\t%s\t%s\t%.2f%%%s\n",
-			usage.Device,
-			usage.MountPoint,
-			formatCapacityByGB(usage.TotalGB),
-			formatCapacityByGB(usage.UsedGB),
-			formatCapacityByGB(usage.FreeGB),
-			usage.UsedPercent,
-			warn,
-		); err != nil {
-			return err
-		}
-	}
-
-	return tw.Flush()
-}
-
 func formatCapacityByGB(valueGB float64) string {
 	switch {
 	case valueGB >= gbPerTB:
@@ -233,7 +303,8 @@ var diskCmd = &cobra.Command{
 			return
 		}
 
-		if err := renderDiskUsageTable(os.Stdout, usages); err != nil {
+		disks := groupByPhysicalDisk(usages)
+		if err := renderPhysicalDisks(os.Stdout, disks); err != nil {
 			fmt.Fprintf(os.Stderr, "输出磁盘占用失败: %v\n", err)
 			os.Exit(1)
 		}

@@ -1,34 +1,33 @@
-# 磁盘占用查询接口文档
+# 磁盘查询接口文档
 
-本文档定义 `server-mgr disk` 使用的可复用磁盘占用查询契约，作为后续扩展的基础。
+本文档定义 `server-mgr disk` 及用户管理模块共用的磁盘查询契约。
 
 ## 数据结构
 
-`DiskUsage` 是单个真实磁盘挂载点的标准化模型。
+### DiskUsage — 单个挂载点
 
 ```go
 type DiskUsage struct {
-    Device      string
-    MountPoint  string
-    TotalGB     float64
-    UsedGB      float64
-    FreeGB      float64
-    UsedPercent float64
+    Device      string  // 设备路径，来源于 /proc/mounts，前缀为 /dev/
+    MountPoint  string  // 挂载点路径
+    TotalGB     float64 // 总容量，GB（1024 进制）
+    UsedGB      float64 // 已使用，GB
+    FreeGB      float64 // 剩余，GB
+    UsedPercent float64 // 使用率百分比，如 83.12
 }
 ```
 
-### 字段语义
+### PhysicalDisk — 物理磁盘（含分区列表）
 
-- `Device`: 设备路径，来源于 `/proc/mounts`，预期前缀为 `/dev/`
-- `MountPoint`: 挂载点路径
-- `TotalGB`: 总容量，单位 GB（1024 进制）
-- `UsedGB`: 已使用容量，单位 GB
-- `FreeGB`: 剩余容量，单位 GB
-- `UsedPercent`: 使用率百分比（例如 `83.12`）
+```go
+type PhysicalDisk struct {
+    Name       string      // 物理盘路径，如 /dev/sda
+    TotalGB    float64     // 物理容量（来自 /sys/block/<disk>/size），0 表示读取失败
+    Partitions []DiskUsage // 该盘下所有已挂载分区，按挂载点升序
+}
+```
 
 ## 查询接口
-
-`DiskUsageProvider` 是高频查询场景的稳定访问接口。
 
 ```go
 type DiskUsageProvider interface {
@@ -36,32 +35,44 @@ type DiskUsageProvider interface {
 }
 ```
 
-### 接口约定
-
+**约定：**
 - 仅返回设备路径以 `/dev/` 开头的挂载记录
-- 从 `/proc/mounts` 读取挂载信息
-- 对每个挂载点调用 `syscall.Statfs` 获取容量统计
-- 返回值为可直接渲染和业务消费的预计算结果
-- 默认会排除系统类挂载（如 `/dev/loop*`、`squashfs`、`/snap/`）
+- 自动排除 `loop*` 设备、`squashfs` 文件系统、`/snap/` 挂载点
+- 结果按挂载点升序排列
 
-## 默认实现
+**默认实现：** `cmd/disk.go` 中的 `ProcMountDiskUsageProvider`，数据源为 `/proc/mounts`。
 
-`cmd/disk.go` 中的 `ProcMountDiskUsageProvider` 为默认实现。
+## 辅助函数
 
-- 挂载源：`/proc/mounts`
-- 输出排序：按挂载点升序
-- 单位换算：字节 -> GB（除数 `1024 * 1024 * 1024`）
+| 函数 | 签名 | 用途 |
+|---|---|---|
+| `groupByPhysicalDisk` | `([]DiskUsage) []PhysicalDisk` | 按物理盘分组，读取 `/sys/block/` 获取物理容量 |
+| `dataMountCandidates` | `([]DiskUsage) []DiskUsage` | 过滤出可供用户使用的数据盘挂载点（排除系统盘） |
+| `physicalDiskName` | `(device string) string` | 从分区路径推断物理盘路径（`sda1`→`sda`，`nvme0n1p1`→`nvme0n1`） |
+| `formatCapacityByGB` | `(float64) string` | 容量格式化，自动换算 MB / GB / TB |
 
-## CLI 输出规则（`server-mgr disk`）
+## 数据盘过滤规则（dataMountCandidates）
 
-- 表头列：`设备` `挂载点` `总量` `已用` `剩余` `使用率`
-- 输出格式：容量统一为 GB，保留两位小数
-- 告警规则：当 `UsedPercent > 80` 时，在行尾追加 ` [!]`
+以下挂载点**不会**出现在数据盘候选列表中：
 
-## 后续扩展建议
+精确排除：`/`、`/boot`、`/boot/efi`、`/home`
 
-- 字段扩展：优先在 `DiskUsage` 追加新字段，避免修改已有字段语义
-- 接口扩展：新增能力时优先新增并行接口（如过滤、分页、附加统计），不直接破坏 `ListDiskUsage()` 签名
-- 实现扩展：如需支持其他数据源，可新增 provider 实现并复用 `DiskUsageProvider` 接口
-- 阈值扩展：告警阈值已在代码中独立常量化，后续可平滑改为配置项或命令行参数
-- 过滤扩展：可在 `excludedDeviceBasePrefixes`、`excludedFSTypes`、`excludedMountPointPrefixes` 中按环境增减规则
+前缀排除：`/proc`、`/sys`、`/dev`、`/run`、`/tmp`、`/snap`
+
+**用途：** `user add` 建立工作目录时的挂载点候选，`user list` 检测用户数据目录时的扫描范围。
+
+## CLI 输出规则（server-mgr disk）
+
+按物理盘分组展示，每组标题行 + 分区明细：
+
+```
+● /dev/sda  [500.00 GB 物理容量]
+  /dev/sda1  /boot  总 512.00 MB  已用 150.00 MB  剩 362.00 MB  29.3%
+  /dev/sda2  /      总 100.00 GB  已用 45.00 GB   剩 55.00 GB   45.0%
+
+● /dev/sdb  [2.00 TB 物理容量]
+  /dev/sdb1  /home  总 2.00 TB    已用 400.00 GB  剩 1.60 TB    20.0%
+```
+
+- 物理容量读取失败时标题行仅显示设备名，不报错
+- 使用率 > 80% 时行尾追加 ` [!]`
