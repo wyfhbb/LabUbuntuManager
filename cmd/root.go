@@ -1,13 +1,54 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
 
 var rootCmd = &cobra.Command{
 	Use:   "server-mgr",
-	Short: "Ubuntu server management CLI",
+	Short: "Ubuntu 服务器管理 CLI",
 }
 
 // Execute runs the root command.
 func Execute() error {
 	return rootCmd.Execute()
+}
+
+func init() {
+	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		fmt.Print(`server-mgr — 实验室 Ubuntu 服务器管理工具
+
+用法:
+  server-mgr <命令> [子命令] [选项]
+
+━━ 磁盘管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  disk                            列出磁盘挂载点及容量（过滤 snap/loop）
+  disk usage                      各用户磁盘使用量，所有用户可用
+    -m, --me                        只显示当前用户
+    -s, --sort total|user           排序列（默认 total 降序）
+    -r, --reverse                   反向排序
+  disk monitor enable             启用每日统计定时任务（需要 root）
+                                    同时安装 disk-usage 快捷命令供所有用户使用
+  disk monitor disable            禁用定时任务（需要 root）
+  disk monitor status             查看定时任务状态及最近统计时间
+  disk monitor run                立即执行一次统计（需要 root）
+
+━━ APT 源管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  source show                     查看当前 APT 镜像源
+  source set <mirror>             切换镜像源
+    可选: aliyun / tsinghua / ustc / bfsu / official
+  source restore                  从备份还原 APT 源
+
+━━ 用户管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  user list                       列出所有用户及数据目录映射
+  user add <用户名>               创建新用户（在数据盘建立工作目录）
+  user del <用户名>               删除用户
+    --purge                         同时删除家目录及各数据盘目录
+  user passwd <用户名>            修改用户密码
+
+使用 "server-mgr <命令> --help" 查看具体命令的选项说明。
+`)
+	})
 }
