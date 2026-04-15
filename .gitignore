@@ -26,3 +26,7 @@ coverage.html
 
 # claude
 .claude/
+
+# 缓存
+.cache/
+.omc/

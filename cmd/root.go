@@ -48,6 +48,18 @@ func init() {
     --purge                         同时删除家目录及各数据盘目录
   user passwd <用户名>            修改用户密码
 
+━━ MOTD 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  motd set                          启用实验室自定义 MOTD（需要 root）
+                                      禁用系统默认脚本，安装自定义欢迎信息
+                                      自动配置公网 IP 定时缓存
+  motd show                         预览当前 MOTD 输出
+  motd reset                        恢复系统默认 MOTD（需要 root）
+
+━━ Docker 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  docker check                      检测 Docker 安装状态
+  docker install                    安装 Docker（使用 BFSU 镜像，需要 root）
+  docker perm                       查看各用户 Docker 权限
+
 使用 "server-mgr <命令> --help" 查看具体命令的选项说明。
 `)
 	})
