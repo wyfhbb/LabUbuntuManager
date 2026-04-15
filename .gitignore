@@ -30,3 +30,4 @@ coverage.html
 # 缓存
 .cache/
 .omc/
+.omx/

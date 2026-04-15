@@ -47,6 +47,15 @@ func init() {
   user del <用户名>               删除用户
     --purge                         同时删除家目录及各数据盘目录
   user passwd <用户名>            修改用户密码
+  user inactive list              列出所有用户的未登录天数
+  user inactive warn              将不活跃用户警告写入 MOTD（需要 root）
+    --days 180                      超过多少天未登录则警告（默认 180）
+  user inactive purge             删除超过指定天数未登录的用户（需要 root）
+    --days 180                      超过多少天未登录则删除（默认 180）
+  user inactive monitor enable    启用每日自动检查（每天 02:00，需要 root）
+    --days 180                      不活跃阈值天数（默认 180）
+  user inactive monitor disable   禁用每日自动检查（需要 root）
+  user inactive monitor status    查看定时任务状态
 
 ━━ MOTD 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   motd set                          启用实验室自定义 MOTD（需要 root）
