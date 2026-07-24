@@ -469,6 +469,9 @@ func renderMotd() {
 	// 磁盘用量
 	renderMotdDisks()
 
+	// GPU 概览（无 N 卡的机器整段跳过）
+	renderMotdGPUs()
+
 	// 环境初始化脚本提示
 	renderInitHints()
 

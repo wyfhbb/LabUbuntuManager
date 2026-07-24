@@ -41,8 +41,8 @@
 | 批次 | 主题 | 新增命令 | 规模 | 前置依赖 | 状态 |
 |---|---|---|---|---|---|
 | 0 | 地基：统一安装入口 | `install` / `version` / `uninstall` | 小 | — | ✅ 已完成 |
-| 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 | 待做 |
-| 2 | 磁盘告警与配额 | `disk quota` / 告警链路 | 中 | 批次 0 | 待做 |
+| 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 | ✅ 已完成 |
+| 2 | 磁盘告警 | 告警链路（配额已放弃） | 中 | 批次 0 | 待做 |
 | 3 | Docker 补全 | `docker perm add/del` / `docker mirror` | 小 | — （可随时插队）| ✅ 已完成 |
 | 4 | 用户生命周期 | `user lock/unlock` / `user key` / 批量创建 | 中 | 批次 0 | 待做 |
 | 5 | 运行时可见性与审计 | `user who` / `top` / 审计日志 | 中 | 批次 0 | 待做 |
@@ -117,7 +117,30 @@
 
 ---
 
-## 批次 1 — GPU 管理
+## 批次 1 — GPU 管理 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- **新增：显卡异常诊断**（本批次外的追加需求，已确认范围为"只分类 `nvidia-smi` 失败"）。
+  `classifyGPUFailure` 是纯函数，把 `nvidia-smi` 的原始报错归成
+  驱动/内核模块版本不一致、内核模块未加载、认不到卡（掉卡）、权限不足、
+  NVML 未知错误、查询超时、未覆盖七类，每类给出「结论 / 现象 / 成因 / 处理步骤」。
+  其中最经典的 `Driver/library version mismatch`（apt 升级驱动后没重启）
+  明确指向重启或热重载模块，并给出对比两边版本的命令。
+  异常同时在 MOTD 里标红一行 + 指向 `gpu status`，不把整屏排障说明塞进登录信息
+- **没有 `nvidia-smi` 时区分两种情况**：扫 sysfs 的 `bus/pci/devices/*/vendor`
+  找 `0x10de` + class `0x03xx`，有卡 → "该装驱动"并给安装步骤；无卡 → "本机没有
+  NVIDIA 显卡"，MOTD 整段跳过、命令正常退出。不依赖 `lspci`（最小化安装未必有 pciutils）
+- **不做缓存**：roadmap 原本建议用 `/var/cache/server-mgr/` 做短期缓存降低登录延迟，
+  实测健康机器上一次 `--query-gpu` 在百毫秒级，加缓存要引入新落盘路径、TTL、
+  以及"MOTD 以 root 跑、VSCode 注入以普通用户跑"带来的读写权限分裂，
+  不值当。改为只加 2s 超时，超时本身归类成"GPU 可能已挂起"这一诊断
+- **CUDA 版本走 `nvidia-smi -q`**：`--query-gpu` 没有这一项，只能从 `键 : 值`
+  输出里取。只在 `gpu status` 调用，不进 MOTD 渲染路径
+- `--query-gpu` 的字段顺序把 `name` 放最后、`--query-compute-apps` 把 `process_name`
+  放最后，配合 `SplitN` 限制段数，避免显卡名/命令行里的逗号把字段切错
+- 进程归属、完整命令行、已运行时长都从 `/proc/<pid>/{status,cmdline,stat}` 读，
+  不额外 fork `ps`；`starttime` 从最后一个 `)` 之后数，避开含空格/括号的进程名
 
 **为什么做：** 实验室服务器最稀缺的资源是显卡，当前项目零 GPU 支持。
 MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后者是用户登录后第一件想知道的事。
