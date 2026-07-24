@@ -83,4 +83,12 @@ chmod 644 "$LOG_FILE"
 # 只保留最近 MAX_LOGS 天的日志
 find "$LOG_DIR" -name "disk-usage-*.log" -type f | sort -r | tail -n +$((MAX_LOGS + 1)) | xargs -r rm
 
+# ── 统计完成后触发一次磁盘告警 ──────────────────────────────────────────────────
+# 报表刚刚更新，正好据此刷新 MOTD 里"谁占用超标"的告警。
+# 二进制不在时静默跳过：本脚本可能是老版本 enable 留下的。
+SERVER_MGR="/usr/local/bin/server-mgr"
+if [ -x "$SERVER_MGR" ]; then
+    "$SERVER_MGR" disk warn >/dev/null 2>&1 || true
+fi
+
 exit 0

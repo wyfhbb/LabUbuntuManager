@@ -228,6 +228,82 @@ type userSummary struct {
 	disks    []diskEntry // 按出现顺序保留，便于展示明细
 }
 
+// diskUsageReport 是每日统计报表的解析结果。
+type diskUsageReport struct {
+	generatedAt string
+	users       []*userSummary // 保持首次出现顺序，便于按 user 排序时稳定
+}
+
+// parseDiskUsageReport 解析 daily-disk-monitor.sh 产出的报表并按用户汇总。
+//
+// 格式：username <TAB> mount_point <TAB> usage_gb <TAB> full_name，
+// 以 # 开头的是注释，其中 "# generated: " 带统计时间。
+func parseDiskUsageReport(r io.Reader) (diskUsageReport, error) {
+	report := diskUsageReport{}
+	byUser := map[string]*userSummary{}
+
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if rest, ok := strings.CutPrefix(line, "# generated: "); ok {
+			report.generatedAt = rest
+			continue
+		}
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) < 3 {
+			continue
+		}
+		username := fields[0]
+
+		var gb float64
+		fmt.Sscanf(fields[2], "%f", &gb)
+
+		fullName := ""
+		if len(fields) >= 4 {
+			fullName = fields[3]
+		}
+
+		u, exists := byUser[username]
+		if !exists {
+			u = &userSummary{username: username, fullName: fullName}
+			byUser[username] = u
+			report.users = append(report.users, u)
+		}
+		u.totalGB += gb
+		u.disks = append(u.disks, diskEntry{mount: fields[1], usageGB: gb})
+	}
+	if err := scanner.Err(); err != nil {
+		return report, fmt.Errorf("读取报告时出错: %w", err)
+	}
+	return report, nil
+}
+
+// openDiskUsageReport 打开每日统计报表，缺失时给出启用统计的指引。
+func openDiskUsageReport() (*os.File, error) {
+	f, err := os.Open(diskCurrentReport)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("暂无统计数据，请先执行: sudo server-mgr disk monitor enable")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取报告失败: %w", err)
+	}
+	return f, nil
+}
+
+// currentInvokingUser 尽量准确地取当前登录用户（sudo 下 USER 可能是 root）。
+func currentInvokingUser() string {
+	for _, key := range []string{"SUDO_USER", "USER", "LOGNAME"} {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // ── disk usage 子命令 ─────────────────────────────────────────────────────────
 
 var diskUsageCmd = &cobra.Command{
@@ -238,77 +314,25 @@ var diskUsageCmd = &cobra.Command{
 		sortBy, _ := cmd.Flags().GetString("sort")
 		reverse, _ := cmd.Flags().GetBool("reverse")
 
-		f, err := os.Open(diskCurrentReport)
+		f, err := openDiskUsageReport()
 		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Fprintln(os.Stderr, "错误: 暂无统计数据，请联系管理员执行: sudo server-mgr disk monitor enable")
-				os.Exit(1)
-			}
-			fmt.Fprintf(os.Stderr, "错误: 读取报告失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
 
-		// 尽量准确获取当前登录用户（sudo 下 USER 可能为 root）
-		currentUser := os.Getenv("SUDO_USER")
-		if currentUser == "" {
-			currentUser = os.Getenv("USER")
-		}
-		if currentUser == "" {
-			currentUser = os.Getenv("LOGNAME")
-		}
-
-		// ── 解析报告文件，按用户汇总 ──────────────────────────────────────
-		generatedAt := ""
-		userMap := map[string]*userSummary{}
-		var userOrder []string // 保持首次出现顺序，便于按 user 排序时稳定
-
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if rest, ok := strings.CutPrefix(line, "# generated: "); ok {
-				generatedAt = rest
-				continue
-			}
-			if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
-				continue
-			}
-			// 格式：username <TAB> disk <TAB> usage_gb <TAB> full_name
-			fields := strings.SplitN(line, "\t", 4)
-			if len(fields) < 3 {
-				continue
-			}
-			username := fields[0]
-			if onlyMe && username != currentUser {
-				continue
-			}
-
-			var gb float64
-			fmt.Sscanf(fields[2], "%f", &gb)
-
-			fullName := ""
-			if len(fields) >= 4 {
-				fullName = fields[3]
-			}
-
-			u, exists := userMap[username]
-			if !exists {
-				u = &userSummary{username: username, fullName: fullName}
-				userMap[username] = u
-				userOrder = append(userOrder, username)
-			}
-			u.totalGB += gb
-			u.disks = append(u.disks, diskEntry{mount: fields[1], usageGB: gb})
-		}
-		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 读取报告时出错: %v\n", err)
+		report, err := parseDiskUsageReport(f)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
+		generatedAt := report.generatedAt
 
-		// 转为切片以排序
-		users := make([]*userSummary, 0, len(userOrder))
-		for _, name := range userOrder {
-			users = append(users, userMap[name])
+		currentUser := currentInvokingUser()
+
+		users := report.users
+		if onlyMe {
+			users = filterUsersByName(users, currentUser)
 		}
 
 		// ── 排序 ──────────────────────────────────────────────────────────
@@ -358,6 +382,108 @@ func sortUsers(users []*userSummary, by string, reverse bool) {
 	}
 }
 
+// filterUsersByName 只保留指定用户，供 disk usage --me 使用。
+func filterUsersByName(users []*userSummary, username string) []*userSummary {
+	var result []*userSummary
+	for _, u := range users {
+		if u.username == username {
+			result = append(result, u)
+		}
+	}
+	return result
+}
+
+// ── disk warn 子命令 ──────────────────────────────────────────────────────────
+
+var diskWarnGB float64
+
+var diskWarnCmd = &cobra.Command{
+	Use:   "warn",
+	Short: "将磁盘占用超标的用户写入 MOTD 警告（需要 root）",
+	Long: `读取每日统计报表，把总占用超过阈值的用户点名写入 MOTD，
+所有用户登录时都能看到是谁把盘占满了。
+
+数据来源是每日统计报表，需要先启用统计：
+  sudo server-mgr disk monitor enable
+
+统计脚本跑完后会自动触发一次，通常不需要手动执行。
+阈值默认取自 config.conf 的 DISK_USER_WARN_GB。
+
+分区使用率超警戒线是另一条链路：实时计算，直接在 MOTD 顶部提示，
+不需要也不受本命令影响。
+
+示例：
+  sudo server-mgr disk warn
+  sudo server-mgr disk warn --gb 200`,
+	Run: func(cmd *cobra.Command, args []string) {
+		requireRoot()
+
+		f, err := openDiskUsageReport()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		report, err := parseDiskUsageReport(f)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+
+		over := selectOverQuotaUsers(report.users, diskWarnGB)
+		if err := writeMotdWarning(warningSourceDisk, renderDiskWarning(over, diskWarnGB, report.generatedAt)); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+
+		if len(over) == 0 {
+			fmt.Printf("没有用户占用超过 %s，磁盘告警已清除\n", formatCapacityByGB(diskWarnGB))
+			return
+		}
+
+		fmt.Printf("已将 %d 个占用超过 %s 的用户写入 MOTD\n", len(over), formatCapacityByGB(diskWarnGB))
+		fmt.Printf("警告文件: %s\n", warningFilePath(warningSourceDisk))
+		fmt.Println()
+		fmt.Println("预览效果: server-mgr motd show")
+	},
+}
+
+// selectOverQuotaUsers 挑出总占用超过阈值的用户，按占用降序。
+func selectOverQuotaUsers(users []*userSummary, thresholdGB float64) []*userSummary {
+	var over []*userSummary
+	for _, u := range users {
+		if u.totalGB > thresholdGB {
+			over = append(over, u)
+		}
+	}
+	sortUsers(over, "total", false)
+	return over
+}
+
+// renderDiskWarning 生成写入 MOTD 的磁盘占用告警文本。
+// 没有超标用户时返回空串，交由 writeMotdWarning 清除该来源。
+func renderDiskWarning(users []*userSummary, thresholdGB float64, generatedAt string) string {
+	if len(users) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(colorBold + colorYellow +
+		fmt.Sprintf("⚠ 以下用户磁盘占用超过 %s", formatCapacityByGB(thresholdGB)) + colorReset + "\n")
+	for _, u := range users {
+		sb.WriteString(fmt.Sprintf("  %s — 共 %s  %s\n",
+			formatUserLabel(u.username, u.fullName), formatCapacityByGB(u.totalGB), buildDetail(u.disks)))
+	}
+
+	hint := "  完整排行: disk usage"
+	if generatedAt != "" {
+		hint = fmt.Sprintf("  统计时间: %s，完整排行: disk usage", generatedAt)
+	}
+	sb.WriteString(colorDim + hint + colorReset)
+	return sb.String()
+}
+
 // buildDetail 将各盘使用量拼成易读字符串，如 "/home:0.12GB  /workspace:52.30GB"。
 func buildDetail(disks []diskEntry) string {
 	parts := make([]string, 0, len(disks))
@@ -377,6 +503,12 @@ func init() {
 	diskUsageCmd.Flags().StringP("sort", "s", "total", "排序列：total（总量，默认）或 user（用户名）")
 	diskUsageCmd.Flags().BoolP("reverse", "r", false, "反向排序")
 
+	// 默认值取自 config.conf，cron 里不带 --gb 调用时拿到的就是管理员配置的阈值
+	warnGB := config().DiskUserWarnGB
+	diskWarnCmd.Flags().Float64Var(&diskWarnGB, "gb", warnGB,
+		fmt.Sprintf("用户总占用超过多少 GB 则写入警告（默认 %g）", warnGB))
+
 	diskCmd.AddCommand(diskMonitorCmd)
 	diskCmd.AddCommand(diskUsageCmd)
+	diskCmd.AddCommand(diskWarnCmd)
 }

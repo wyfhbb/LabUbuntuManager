@@ -244,3 +244,141 @@ func TestSortUsers(t *testing.T) {
 		}
 	}
 }
+
+// ── 磁盘告警链路 ─────────────────────────────────────────────────────────────
+
+func TestParseDiskUsageReport(t *testing.T) {
+	report := strings.Join([]string{
+		"# generated: 2026-07-25 01:00:03",
+		"# columns: username\tdisk\tusage_gb\tfull_name",
+		"alice\t/home\t12.30\t张三",
+		"alice\t/data\t800.00\t张三",
+		"bob\t/home\t3.50\t",
+		"",
+		"字段不足的行",
+	}, "\n")
+
+	got, err := parseDiskUsageReport(strings.NewReader(report))
+	if err != nil {
+		t.Fatalf("parseDiskUsageReport 返回错误: %v", err)
+	}
+	if got.generatedAt != "2026-07-25 01:00:03" {
+		t.Errorf("统计时间 = %q", got.generatedAt)
+	}
+	if len(got.users) != 2 {
+		t.Fatalf("期望 2 个用户，实际 %d 个: %+v", len(got.users), got.users)
+	}
+
+	// 保持首次出现顺序
+	alice := got.users[0]
+	if alice.username != "alice" || alice.fullName != "张三" {
+		t.Errorf("第一个用户解析错误: %+v", alice)
+	}
+	// 多盘要累加
+	if diff := alice.totalGB - 812.30; diff > 0.001 || diff < -0.001 {
+		t.Errorf("总占用 = %v，期望 812.30", alice.totalGB)
+	}
+	if buildDetail(alice.disks) != "/home:12.30GB  /data:800.00GB" {
+		t.Errorf("明细 = %q", buildDetail(alice.disks))
+	}
+	if got.users[1].fullName != "" {
+		t.Errorf("没有全名时应为空串，得到 %q", got.users[1].fullName)
+	}
+}
+
+func TestSelectOverQuotaUsers(t *testing.T) {
+	users := []*userSummary{
+		{username: "alice", totalGB: 812.30},
+		{username: "bob", totalGB: 3.50},
+		{username: "carol", totalGB: 500},
+		{username: "dave", totalGB: 640},
+	}
+
+	over := selectOverQuotaUsers(users, 500)
+	if len(over) != 2 {
+		t.Fatalf("期望 2 个超标用户，实际 %d 个: %+v", len(over), over)
+	}
+	// 按占用降序
+	if over[0].username != "alice" || over[1].username != "dave" {
+		t.Errorf("排序错误: %s, %s", over[0].username, over[1].username)
+	}
+	// 恰好等于阈值不算超标
+	for _, u := range over {
+		if u.username == "carol" {
+			t.Error("恰好等于阈值的用户不该算超标")
+		}
+	}
+}
+
+func TestRenderDiskWarning(t *testing.T) {
+	// 无超标用户时返回空串，交由 writeMotdWarning 清除该来源
+	if got := renderDiskWarning(nil, 500, "2026-07-25 01:00:03"); got != "" {
+		t.Errorf("无超标用户时应返回空串，得到 %q", got)
+	}
+
+	users := []*userSummary{
+		{username: "alice", fullName: "张三", totalGB: 812.30,
+			disks: []diskEntry{{mount: "/data", usageGB: 800}}},
+		{username: "bob", totalGB: 640},
+	}
+
+	got := renderDiskWarning(users, 500, "2026-07-25 01:00:03")
+	for _, want := range []string{
+		"超过 500.00 GB", // 阈值
+		"alice (张三)",   // 有全名
+		"812.30 GB",
+		"/data:800.00GB", // 明细
+		"2026-07-25 01:00:03",
+		"disk usage",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("告警文本缺少 %q:\n%s", want, got)
+		}
+	}
+	// 没有全名的用户不该出现空括号
+	if strings.Contains(got, "bob ()") {
+		t.Errorf("没有全名时不该出现空括号:\n%s", got)
+	}
+
+	// 报表没记统计时间时也不能输出 "统计时间: "
+	noTime := renderDiskWarning(users, 500, "")
+	if strings.Contains(noTime, "统计时间") {
+		t.Errorf("没有统计时间时不该出现该字段:\n%s", noTime)
+	}
+}
+
+func TestSelectOverThresholdMounts(t *testing.T) {
+	usages := []DiskUsage{
+		{MountPoint: "/", UsedPercent: 45.0},
+		{MountPoint: "/home", UsedPercent: 88.1},
+		{MountPoint: "/data", UsedPercent: 92.3},
+		{MountPoint: "/boot", UsedPercent: 80.0},
+	}
+
+	over := selectOverThresholdMounts(usages, 80)
+	if len(over) != 2 {
+		t.Fatalf("期望 2 个超线分区，实际 %d 个: %+v", len(over), over)
+	}
+	// 按使用率降序，最紧张的排最前
+	if over[0].MountPoint != "/data" || over[1].MountPoint != "/home" {
+		t.Errorf("排序错误: %s, %s", over[0].MountPoint, over[1].MountPoint)
+	}
+
+	if len(selectOverThresholdMounts(usages, 95)) != 0 {
+		t.Error("阈值高于所有分区时应返回空")
+	}
+	if len(selectOverThresholdMounts(nil, 80)) != 0 {
+		t.Error("无挂载点时应返回空")
+	}
+}
+
+func TestFilterUsersByName(t *testing.T) {
+	users := []*userSummary{{username: "alice"}, {username: "bob"}}
+
+	if got := filterUsersByName(users, "bob"); len(got) != 1 || got[0].username != "bob" {
+		t.Errorf("filterUsersByName 结果错误: %+v", got)
+	}
+	if got := filterUsersByName(users, "nobody"); len(got) != 0 {
+		t.Errorf("查不到的用户应返回空，得到 %+v", got)
+	}
+}

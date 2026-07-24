@@ -42,7 +42,7 @@
 |---|---|---|---|---|---|
 | 0 | 地基：统一安装入口 | `install` / `version` / `uninstall` | 小 | — | ✅ 已完成 |
 | 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 | ✅ 已完成 |
-| 2 | 磁盘告警 | 告警链路（配额已放弃） | 中 | 批次 0 | 待做 |
+| 2 | 磁盘告警 | `disk warn` / 告警链路 | 中 | 批次 0 | ✅ 已完成 |
 | 3 | Docker 补全 | `docker perm add/del` / `docker mirror` | 小 | — （可随时插队）| ✅ 已完成 |
 | 4 | 用户生命周期 | `user lock/unlock` / `user key` / 批量创建 | 中 | 批次 0 | 待做 |
 | 5 | 运行时可见性与审计 | `user who` / `top` / 审计日志 | 中 | 批次 0 | 待做 |
@@ -172,7 +172,34 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 
 ---
 
-## 批次 2 — 磁盘告警与配额
+## 批次 2 — 磁盘告警 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- **`disk quota` 子命令组整个放弃**：不做使用量硬限制。原计划的
+  `quota status` / `quota set` / `quota enable` 均不实现 ——
+  `quota enable` 要改 `/etc/fstab` 挂载参数并跑 `quotacheck`，改坏会导致机器起不来，
+  收益不足以支撑这个风险。告警链路已经能回答"谁占了多少"，处置交给管理员
+- **告警文件改成 `motd/warnings.d/` 目录**（而非单文件内分段标记）：
+  每个来源一个文件，`10-disk.txt` / `20-inactive.txt`，数字前缀即 MOTD 显示顺序。
+  各来源各写各的，天然不冲突，也不会因为 `disk warn` 和 `inactive warn`
+  同时被 cron 触发而互相覆盖。落盘路径 `motdWarningsDir` /
+  `legacyMotdWarningsFile` 改成变量以便测试替换夹具
+  - 迁移：写入路径遇到老的 `warnings.txt` 时挪成 `20-inactive.txt` 并删除老文件
+    （老文件内容只可能来自 inactive，当时它是唯一写入方）；
+    读取路径同时兼容老文件，且**只读不迁移** —— MOTD 渲染可能以普通用户身份
+    执行（VSCode 注入的那条），没有写 `/usr/local/lib` 的权限
+- **两条告警链路口径分开**：
+  - 用户级：`disk warn --gb N`，阈值 `DISK_USER_WARN_GB`（默认 **500 GB**），
+    读每日统计报表，超标用户点名写入 `warnings.d/10-disk.txt`
+  - 分区级：复用已有的 `DISK_WARN_PERCENT`（默认 80%），**实时计算不落盘**，
+    直接在 MOTD 顶部醒目提示。盘一撑满下次登录立刻可见，不必等次日统计
+- `daily-disk-monitor.sh` 末尾追加 `server-mgr disk warn`，二进制不在时静默跳过
+  （脚本可能是老版本 `enable` 留下的）
+- 顺带（为复用而必需，非顺手重构）：`disk usage` 里内联的报表解析抽成
+  `parseDiskUsageReport`，`disk warn` 复用；`--me` 的过滤从解析中间挪到解析之后，
+  行为不变。`renderMotdDisks` 改为接收已查好的 `[]DiskUsage`，
+  避免顶部告警和下面的明细各查一遍 `/proc/mounts`
 
 **为什么做：** [daily-disk-monitor.sh](../cmd/shell/daily-disk-monitor.sh) 每天产出报表就结束了，
 没有任何超标处理路径。对比 `user inactive` 已经跑通的 `warn → MOTD → purge` 链路，
@@ -181,21 +208,17 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 **交付内容**
 
 - 磁盘告警链路（复用 inactive 的现成机制，改动最小）：
-  - `disk warn --threshold <GB|%>`：把超标用户写入 `motd/warnings.txt`
+  - `disk warn --gb <GB>`：把超标用户写入 `motd/warnings.d/10-disk.txt`
   - 日常统计脚本跑完后自动触发一次 warn
   - 分区级告警：任一挂载点使用率超警戒线时，MOTD 顶部醒目提示
-- `disk quota` 子命令组做硬约束：
-  - `disk quota status`：查看当前配额支持情况与各用户软/硬限制
-  - `disk quota set <用户> <软限> <硬限>`：ext4 走 `setquota`，XFS 走 project quota
-  - `disk quota enable`：检查并引导开启文件系统 quota 支持（挂载参数 + `quotacheck`）
+- ~~`disk quota` 子命令组做硬约束~~ —— 已放弃，见上方决策
 - `motd/warnings.txt` 当前被 inactive 独占（整文件覆写），需要改成分区段写入，
   否则磁盘告警和不活跃告警会互相覆盖 —— 这是做本批次前必须先解决的结构问题
 
 **验收**
 
 - 制造一个超标用户，次日统计后 MOTD 出现磁盘告警，且不影响已有的不活跃告警
-- `disk quota set` 后用户写入超过硬限制时被文件系统拒绝
-- 不支持 quota 的文件系统上给出明确提示而非静默失败
+  （`TestDiskWarningDoesNotDisturbInactiveWarning` 覆盖）
 
 ---
 
@@ -316,3 +339,17 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 - **cron → systemd timer**：当前三处 cron 工作正常，迁移收益不足以支撑改动成本
 - **Web UI / HTTP 接口**：定位是 CLI 工具，加 Web 会显著扩大攻击面
 - **`--json` 输出**：等到确实有脚本要消费本工具输出时再做
+- **磁盘配额硬限制**（原批次 2 的 `disk quota` 子命令组，2026-07-25 决定放弃）：
+  `quota enable` 需要改 `/etc/fstab` 挂载参数、remount、跑 `quotacheck`，
+  改坏会导致机器起不来，收益不足以支撑这个风险。
+  批次 2 的告警链路已经能回答"谁占了多少"，处置交给管理员
+- **GPU 掉卡 / Xid / ECC 主动检测**（批次 1 时评估后未纳入）：
+  需要落一份"上次看到几张卡"的状态文件，且 `dmesg` 通常要 root，
+  与"只读命令不要求 root"冲突。目前 `nvidia-smi` 报 `No devices were found`
+  时已归类为疑似掉卡并给出 `lspci` / `dmesg` 排查命令，够用。
+  真要主动推送掉卡告警，更适合放到批次 6 一起做
+- **主动比对已安装驱动包版本与已加载内核模块版本**（批次 1 时评估后未纳入）：
+  即使 `nvidia-smi` 当前正常，也能提前预警"已升级驱动但未重启"。
+  代价是要解析 `dpkg -l` 输出并与 `/proc/driver/nvidia/version` 对齐，
+  而真正出问题的那一刻 `nvidia-smi` 一定会报 mismatch、届时已有明确诊断，
+  提前量的价值不大

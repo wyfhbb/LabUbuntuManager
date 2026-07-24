@@ -93,37 +93,18 @@ var userInactiveWarnCmd = &cobra.Command{
 		days := inactiveWarnDays
 
 		users := collectInactiveUsers(days)
+		if err := writeMotdWarning(warningSourceInactive, renderInactiveWarning(users, days)); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+
 		if len(users) == 0 {
-			if err := os.WriteFile(motdWarningsFile, []byte(""), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "错误: 无法清空警告文件: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("没有超过 %d 天未登录的用户，MOTD 警告已清空\n", days)
+			fmt.Printf("没有超过 %d 天未登录的用户，不活跃告警已清除\n", days)
 			return
 		}
 
-		// 生成警告内容
-		var sb strings.Builder
-		sb.WriteString(colorBold + colorYellow + fmt.Sprintf("⚠ 以下用户超过 %d 天未登录", days) + colorReset + "\n")
-		for _, u := range users {
-			sb.WriteString(fmt.Sprintf("  %s (%s) — 最后登录: %s (%d 天前)\n",
-				u.username, u.fullName, u.lastLogin, u.daysSince))
-		}
-		sb.WriteString(colorDim + "  管理员可执行: sudo server-mgr user inactive purge --days " + fmt.Sprintf("%d", days) + colorReset)
-
-		// 确保目录存在
-		if err := os.MkdirAll(motdDataDir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法创建目录 %s: %v\n", motdDataDir, err)
-			os.Exit(1)
-		}
-
-		if err := os.WriteFile(motdWarningsFile, []byte(sb.String()), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法写入警告文件 %s: %v\n", motdWarningsFile, err)
-			os.Exit(1)
-		}
-
 		fmt.Printf("已将 %d 个超过 %d 天未登录的用户警告写入 MOTD\n", len(users), days)
-		fmt.Printf("警告文件: %s\n", motdWarningsFile)
+		fmt.Printf("警告文件: %s\n", warningFilePath(warningSourceInactive))
 		fmt.Println()
 		fmt.Println("所有用户下次登录时将看到此警告。")
 		fmt.Println("预览效果: server-mgr motd show")
@@ -286,18 +267,13 @@ var inactiveMonitorEnableCmd = &cobra.Command{
 		// 5. 立即执行一次检查
 		fmt.Print("正在执行首次检查... ")
 		users := collectInactiveUsers(days)
+		if err := writeMotdWarning(warningSourceInactive, renderInactiveWarning(users, days)); err != nil {
+			fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
+			os.Exit(1)
+		}
 		if len(users) == 0 {
-			os.WriteFile(motdWarningsFile, []byte(""), 0644)
 			fmt.Printf("完成（无超过 %d 天未登录的用户）\n", days)
 		} else {
-			var sb strings.Builder
-			sb.WriteString(colorBold + colorYellow + fmt.Sprintf("⚠ 以下用户超过 %d 天未登录", days) + colorReset + "\n")
-			for _, u := range users {
-				sb.WriteString(fmt.Sprintf("  %s (%s) — 最后登录: %s (%d 天前)\n",
-					u.username, u.fullName, u.lastLogin, u.daysSince))
-			}
-			sb.WriteString(colorDim + "  管理员可执行: sudo server-mgr user inactive purge --days " + fmt.Sprintf("%d", days) + colorReset)
-			os.WriteFile(motdWarningsFile, []byte(sb.String()), 0644)
 			fmt.Printf("完成（%d 个用户已写入 MOTD）\n", len(users))
 		}
 
@@ -342,13 +318,10 @@ var inactiveMonitorStatusCmd = &cobra.Command{
 
 		fmt.Printf("阈值天数:  %d 天\n", cfg.InactiveDays)
 
-		if info, err := os.Stat(motdWarningsFile); err == nil {
-			data, _ := os.ReadFile(motdWarningsFile)
-			if strings.TrimSpace(string(data)) != "" {
-				fmt.Printf("MOTD 警告:  已写入（%s）\n", info.ModTime().Format("2006-01-02 15:04:05"))
-			} else {
-				fmt.Println("MOTD 警告:  无")
-			}
+		path := warningFilePath(warningSourceInactive)
+		if info, err := os.Stat(path); err == nil {
+			fmt.Printf("MOTD 警告:  已写入（%s）\n", info.ModTime().Format("2006-01-02 15:04:05"))
+			fmt.Printf("           %s\n", path)
 		} else {
 			fmt.Println("MOTD 警告:  无")
 		}
@@ -368,24 +341,42 @@ func readInactiveConf() int {
 	return days
 }
 
-// updateMotdWarnings 重新检查不活跃用户并更新 MOTD 警告文件。
-func updateMotdWarnings(days int) {
-	users := collectInactiveUsers(days)
+// renderInactiveWarning 生成写入 MOTD 的不活跃用户告警文本。
+// 没有不活跃用户时返回空串，交由 writeMotdWarning 清除该来源。
+func renderInactiveWarning(users []inactiveUser, days int) string {
 	if len(users) == 0 {
-		os.WriteFile(motdWarningsFile, []byte(""), 0644)
-		fmt.Println("MOTD 警告已清空（无不活跃用户）")
-		return
+		return ""
 	}
 
 	var sb strings.Builder
 	sb.WriteString(colorBold + colorYellow + fmt.Sprintf("⚠ 以下用户超过 %d 天未登录", days) + colorReset + "\n")
 	for _, u := range users {
-		sb.WriteString(fmt.Sprintf("  %s (%s) — 最后登录: %s (%d 天前)\n",
-			u.username, u.fullName, u.lastLogin, u.daysSince))
+		sb.WriteString(fmt.Sprintf("  %s — 最后登录: %s (%d 天前)\n",
+			formatUserLabel(u.username, u.fullName), u.lastLogin, u.daysSince))
 	}
-	sb.WriteString(colorDim + "  管理员可执行: sudo server-mgr user inactive purge --days " + fmt.Sprintf("%d", days) + colorReset)
+	sb.WriteString(colorDim + fmt.Sprintf("  管理员可执行: sudo server-mgr user inactive purge --days %d", days) + colorReset)
+	return sb.String()
+}
 
-	os.WriteFile(motdWarningsFile, []byte(sb.String()), 0644)
+// formatUserLabel 拼出 "用户名 (全名)"，没有全名时只给用户名。
+func formatUserLabel(username, fullName string) string {
+	if strings.TrimSpace(fullName) == "" {
+		return username
+	}
+	return fmt.Sprintf("%s (%s)", username, fullName)
+}
+
+// updateMotdWarnings 重新检查不活跃用户并更新 MOTD 告警。
+func updateMotdWarnings(days int) {
+	users := collectInactiveUsers(days)
+	if err := writeMotdWarning(warningSourceInactive, renderInactiveWarning(users, days)); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: %v\n", err)
+		return
+	}
+	if len(users) == 0 {
+		fmt.Println("不活跃告警已清除（无不活跃用户）")
+		return
+	}
 	fmt.Printf("MOTD 警告已更新（%d 个不活跃用户）\n", len(users))
 }
 

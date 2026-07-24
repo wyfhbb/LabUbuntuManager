@@ -19,9 +19,13 @@ import (
 const bytesPerGB = 1024 * 1024 * 1024
 const bytesPerSector = 512
 
-// defaultDiskUsageWarnPercent 是磁盘使用率警戒线的出厂默认值，
+// defaultDiskUsageWarnPercent 是分区使用率警戒线的出厂默认值，
 // 实际取值见 config.conf 的 DISK_WARN_PERCENT。
 const defaultDiskUsageWarnPercent = 80.0
+
+// defaultDiskUserWarnGB 是单用户总占用告警线的出厂默认值，
+// 实际取值见 config.conf 的 DISK_USER_WARN_GB。
+const defaultDiskUserWarnGB = 500.0
 const gbPerTB = 1024.0
 const mbPerGB = 1024.0
 

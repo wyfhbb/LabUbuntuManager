@@ -92,6 +92,7 @@ func TestCronExprAndDisplay(t *testing.T) {
 func TestRenderConfigFileRoundTrip(t *testing.T) {
 	cfg := serverMgrConfig{
 		DiskWarnPercent:  85.5,
+		DiskUserWarnGB:   250,
 		DiskLogKeepDays:  14,
 		DiskCronTime:     "30 3",
 		InactiveCronTime: "45 4",

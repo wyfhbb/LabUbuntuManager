@@ -20,7 +20,8 @@ const (
 // 落盘格式为 shell 可 source 的 KEY=VALUE，daily-disk-monitor.sh 直接 source
 // 同一个文件读取保留天数，避免 Go 端与脚本端各写一份。
 type serverMgrConfig struct {
-	DiskWarnPercent  float64 // 磁盘使用率警戒线（百分比）
+	DiskWarnPercent  float64 // 分区使用率警戒线（百分比），超过后 MOTD 顶部告警
+	DiskUserWarnGB   float64 // 单用户总占用告警线（GB），超过后 disk warn 点名写入 MOTD
 	DiskLogKeepDays  int     // /var/log/disk-usage 下日志保留天数
 	DiskCronTime     string  // 每日磁盘统计时间，格式 "分 时"
 	InactiveCronTime string  // 每日不活跃用户检查时间，格式 "分 时"
@@ -30,6 +31,7 @@ type serverMgrConfig struct {
 func defaultConfig() serverMgrConfig {
 	return serverMgrConfig{
 		DiskWarnPercent:  defaultDiskUsageWarnPercent,
+		DiskUserWarnGB:   defaultDiskUserWarnGB,
 		DiskLogKeepDays:  30,
 		DiskCronTime:     "0 1",
 		InactiveCronTime: "0 2",
@@ -60,6 +62,10 @@ func parseConfig(r io.Reader) serverMgrConfig {
 		case "DISK_WARN_PERCENT":
 			if v, err := strconv.ParseFloat(value, 64); err == nil && v > 0 && v <= 100 {
 				cfg.DiskWarnPercent = v
+			}
+		case "DISK_USER_WARN_GB":
+			if v, err := strconv.ParseFloat(value, 64); err == nil && v > 0 {
+				cfg.DiskUserWarnGB = v
 			}
 		case "DISK_LOG_KEEP_DAYS":
 			if v, err := strconv.Atoi(value); err == nil && v > 0 {
@@ -126,8 +132,13 @@ func renderConfigFile(cfg serverMgrConfig) string {
 	sb.WriteString("# 由 server-mgr install 生成，可直接编辑；格式为 shell 可 source 的 KEY=VALUE。\n")
 	sb.WriteString("# 改动后需重新执行对应的 enable 命令才会更新 /etc/cron.d 下的定时任务。\n")
 	sb.WriteString("\n")
-	sb.WriteString("# 磁盘使用率警戒线（百分比），超过后 disk / MOTD 输出标红\n")
+	sb.WriteString("# 分区使用率警戒线（百分比）。超过后 disk / MOTD 输出标红，\n")
+	sb.WriteString("# 并在 MOTD 顶部醒目提示该分区\n")
 	sb.WriteString(fmt.Sprintf("DISK_WARN_PERCENT=%g\n", cfg.DiskWarnPercent))
+	sb.WriteString("\n")
+	sb.WriteString("# 单用户总占用告警线（GB）。每日统计跑完后，占用超过此值的用户\n")
+	sb.WriteString("# 会被 disk warn 点名写入 MOTD 警告\n")
+	sb.WriteString(fmt.Sprintf("DISK_USER_WARN_GB=%g\n", cfg.DiskUserWarnGB))
 	sb.WriteString("\n")
 	sb.WriteString("# /var/log/disk-usage 下每日报表保留天数\n")
 	sb.WriteString(fmt.Sprintf("DISK_LOG_KEEP_DAYS=%d\n", cfg.DiskLogKeepDays))

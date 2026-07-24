@@ -4,9 +4,11 @@ import (
 	"bufio"
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -17,7 +19,6 @@ import (
 const (
 	motdDataDir      = serverMgrLibDir + "/motd"
 	motdHeaderFile   = motdDataDir + "/header.txt"
-	motdWarningsFile = motdDataDir + "/warnings.txt"
 	motdDisabledList = motdDataDir + "/disabled-scripts.txt"
 	motdUpdateDir    = "/etc/update-motd.d"
 	motdScriptName   = "99-lab-info"
@@ -262,10 +263,14 @@ var motdStatusCmd = &cobra.Command{
 			fmt.Println("欢迎语:      未设置")
 		}
 
-		if data, err := os.ReadFile(motdWarningsFile); err == nil && strings.TrimSpace(string(data)) != "" {
-			fmt.Printf("MOTD 警告:   已写入 %s\n", motdWarningsFile)
+		if sources := listMotdWarningSources(); len(sources) > 0 {
+			fmt.Printf("MOTD 警告:   %s\n", strings.Join(sources, "、"))
+			fmt.Printf("             目录: %s\n", motdWarningsDir)
 		} else {
 			fmt.Println("MOTD 警告:   无")
+		}
+		if _, err := os.Stat(legacyMotdWarningsFile); err == nil {
+			fmt.Printf("             发现旧版单文件告警 %s，下次写入告警时会自动迁移\n", legacyMotdWarningsFile)
 		}
 
 		if _, err := os.Stat(legacyMotdCronFile); err == nil {
@@ -458,6 +463,12 @@ func renderMotd() {
 	}
 	fmt.Println()
 
+	// 分区用量只查一次，顶部告警和下面的明细共用
+	usages, _ := NewProcMountDiskUsageProvider().ListDiskUsage()
+
+	// 分区超警戒线：实时算，顶部醒目提示，不依赖每日统计
+	renderMotdDiskAlerts(os.Stdout, usages)
+
 	// 系统信息：hostname · OS · uptime
 	renderSystemInfo()
 
@@ -467,7 +478,7 @@ func renderMotd() {
 	fmt.Println()
 
 	// 磁盘用量
-	renderMotdDisks()
+	renderMotdDisks(usages)
 
 	// GPU 概览（无 N 卡的机器整段跳过）
 	renderMotdGPUs()
@@ -478,13 +489,46 @@ func renderMotd() {
 	// 系统提醒（apt 更新、需要重启）
 	renderSystemWarnings()
 
-	// 自定义警告（user inactive 等写入）
-	if data, err := os.ReadFile(motdWarningsFile); err == nil {
-		if s := strings.TrimSpace(string(data)); s != "" {
-			fmt.Println()
-			fmt.Println(s)
+	// 各来源写入的自定义警告（磁盘占用、不活跃用户）
+	for _, block := range readMotdWarnings() {
+		fmt.Println()
+		fmt.Println(block)
+	}
+}
+
+// renderMotdDiskAlerts 在 MOTD 顶部提示使用率超警戒线的分区。
+//
+// 与下面的分区明细相比，这条的作用是"一眼看见"：盘快满了不该需要用户
+// 自己去比对每一行的百分比。
+func renderMotdDiskAlerts(w io.Writer, usages []DiskUsage) {
+	over := selectOverThresholdMounts(usages, config().DiskWarnPercent)
+	if len(over) == 0 {
+		return
+	}
+
+	for i, u := range over {
+		label := "⚠ 磁盘告警: "
+		if i > 0 {
+			label = "            " // 后续行与首行对齐
+		}
+		fmt.Fprintf(w, "  %s%s%s%s 使用率 %.1f%%，仅剩 %s%s\n",
+			colorRed, colorBold, label, u.MountPoint, u.UsedPercent,
+			formatCapacityByGB(u.FreeGB), colorReset)
+	}
+	fmt.Fprintf(w, "  %s            请及时清理，查看各用户占用: disk usage%s\n", colorDim, colorReset)
+	fmt.Fprintln(w)
+}
+
+// selectOverThresholdMounts 挑出使用率超过警戒线的挂载点，按使用率降序。
+func selectOverThresholdMounts(usages []DiskUsage, warnPercent float64) []DiskUsage {
+	var over []DiskUsage
+	for _, u := range usages {
+		if u.UsedPercent > warnPercent {
+			over = append(over, u)
 		}
 	}
+	sort.SliceStable(over, func(i, j int) bool { return over[i].UsedPercent > over[j].UsedPercent })
+	return over
 }
 
 func renderSystemInfo() {
@@ -513,10 +557,8 @@ func renderNetworkInfo() {
 	}
 }
 
-func renderMotdDisks() {
-	provider := NewProcMountDiskUsageProvider()
-	usages, err := provider.ListDiskUsage()
-	if err != nil || len(usages) == 0 {
+func renderMotdDisks(usages []DiskUsage) {
+	if len(usages) == 0 {
 		return
 	}
 

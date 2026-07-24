@@ -31,8 +31,8 @@ func init() {
     -y, --yes                       跳过确认
                                     保留 /var/log/disk-usage 与 /usr/local/lib/server-mgr
 
-  配置文件: /usr/local/lib/server-mgr/config.conf（磁盘警戒线、日志保留天数、
-            定时任务时间、不活跃天数阈值）
+  配置文件: /usr/local/lib/server-mgr/config.conf（分区使用率警戒线、单用户占用
+            告警线、日志保留天数、定时任务时间、不活跃天数阈值）
 
 ━━ 磁盘管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   disk                            列出磁盘挂载点及容量（过滤 snap/loop）
@@ -40,6 +40,11 @@ func init() {
     -m, --me                        只显示当前用户
     -s, --sort total|user           排序列（默认 total 降序）
     -r, --reverse                   反向排序
+  disk warn                       占用超标的用户点名写入 MOTD 警告（需要 root）
+    --gb 500                        用户总占用告警线（默认取自 config.conf）
+                                    每日统计跑完后自动触发，通常无需手动执行
+                                    分区使用率超警戒线是另一条链路：实时计算，
+                                    直接在 MOTD 顶部提示，不受本命令影响
   disk monitor enable             启用每日统计定时任务（需要 root）
                                     同时安装 disk-usage 快捷命令供所有用户使用
   disk monitor disable            禁用定时任务（需要 root）
