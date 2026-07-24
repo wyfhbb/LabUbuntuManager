@@ -38,22 +38,35 @@
 
 ## 总览
 
-| 批次 | 主题 | 新增命令 | 规模 | 前置依赖 |
-|---|---|---|---|---|
-| 0 | 地基：统一安装入口 | `install` / `version` / `uninstall` | 小 | — |
-| 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 |
-| 2 | 磁盘告警与配额 | `disk quota` / 告警链路 | 中 | 批次 0 |
-| 3 | Docker 补全 | `docker perm add/del` / `docker mirror` | 小 | — （可随时插队）|
-| 4 | 用户生命周期 | `user lock/unlock` / `user key` / 批量创建 | 中 | 批次 0 |
-| 5 | 运行时可见性与审计 | `user who` / `top` / 审计日志 | 中 | 批次 0 |
-| 6 | 主动告警通道 | `notify` | 中 | 批次 1、2 |
+| 批次 | 主题 | 新增命令 | 规模 | 前置依赖 | 状态 |
+|---|---|---|---|---|---|
+| 0 | 地基：统一安装入口 | `install` / `version` / `uninstall` | 小 | — | ✅ 已完成 |
+| 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 | 待做 |
+| 2 | 磁盘告警与配额 | `disk quota` / 告警链路 | 中 | 批次 0 | 待做 |
+| 3 | Docker 补全 | `docker perm add/del` / `docker mirror` | 小 | — （可随时插队）| ✅ 已完成 |
+| 4 | 用户生命周期 | `user lock/unlock` / `user key` / 批量创建 | 中 | 批次 0 | 待做 |
+| 5 | 运行时可见性与审计 | `user who` / `top` / 审计日志 | 中 | 批次 0 | 待做 |
+| 6 | 主动告警通道 | `notify` | 中 | 批次 1、2 | 待做 |
 
 **建议顺序：** 0 → 1 → 2 → 3 → 4 → 5 → 6。
 批次 3 与其他批次无耦合，任何时候都可以插队做掉。
 
 ---
 
-## 批次 0 — 地基：统一安装入口
+## 批次 0 — 地基：统一安装入口 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- 公网 IP 链路选择**删除**：`fetchPublicIP`、`/var/cache/server-mgr/public-ip.txt`、
+  每小时抓 IP 的 `/etc/cron.d/server-mgr-motd` 全部移除，`getLocalIPAndGateway`
+  改为只返回本机 IP 的 `getLocalIP`；`motd set` / `motd reset` 会顺带清掉老机器上的残留
+- `config.conf` 采用 shell 可 source 的 `KEY=VALUE`，`daily-disk-monitor.sh`
+  直接 source 同一个文件读保留天数；`install` 时把旧的 `motd/inactive-days.conf`
+  迁移进来并删除旧文件
+- VSCode 注入片段改为 `# server-mgr vscode-motd begin/end` 成对标记，
+  删除按标记区间进行；老的单标记片段在 `motd set` 时自动升级
+- `uninstall` 加了 `-y/--yes`（不带则交互确认），保留 `/var/log/disk-usage`
+  与 `/usr/local/lib/server-mgr`
 
 **为什么先做：** 后续每个批次都要把二进制装到服务器上。当前
 `copyFile(execPath, installedBinPath)` 在三处各写了一遍
@@ -163,7 +176,16 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 
 ---
 
-## 批次 3 — Docker 补全（可插队）
+## 批次 3 — Docker 补全（可插队）✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- 镜像地址三层取值：代码内置默认 `https://docker.1ms.run` → `make build` 时由
+  `.env` 的 `DOCKER_MIRRORS` 经 `-ldflags -X` 覆盖 → `docker mirror set <URL...>`
+  命令行显式覆盖。国内镜像仓库大多不可用，目前只内置这一个，后续确认到新地址
+  追加进 `.env` 重新构建即可，不必改代码
+- `docker mirror set` 写 `daemon.json` 前备份到 `daemon.json.bak`，
+  重启 Docker 需交互确认（会中断运行中的容器），拒绝则打印手动命令
 
 **为什么做：** 规模最小、见效最快，且与其他批次零耦合。
 
@@ -247,6 +269,21 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 - 同一告警在静默窗口内不重复发送
 
 ---
+
+## 实施中发现并已修掉的问题
+
+- **`physicalDiskName` 会剥掉整盘设备名末尾的数字**（批次 0 补单测时发现，
+  2026-07-25 已修）：未分区、整盘直接挂载的数据盘（实验室常见做法，如
+  `mkfs.ext4 /dev/nvme0n1` 后挂到 `/data`）曾被算成 `/dev/nvme0n`，
+  物理盘标题显示错误盘名且读不到 `/sys/block/*/size`，物理容量为空 ——
+  与"按硬盘展示整盘容量"的设计意图相悖。
+  改为以 sysfs 为准：`/sys/block/<名字>` 存在即整盘，分区目录下有 `partition`
+  文件、其父目录即所属整盘；sysfs 查不到时回落到命名规则
+  （`nvme\d+n\d+` / `mmcblk\d+` / `md\d+` / `dm-\d+` 视为整盘名，其余去掉末尾数字）。
+  `sysfsRoot` 抽成变量以便用夹具目录做单测
+
+  遗留：`/proc/mounts` 里出现 `/dev/mapper/<vg>-<lv>` 这类 LVM 设备时，
+  仍读不到物理容量（显示为无容量的标题行）。需要时再评估是否解析到底层 PV
 
 ## 暂不列入
 

@@ -23,6 +23,17 @@ func init() {
 用法:
   server-mgr <命令> [子命令] [选项]
 
+━━ 安装与版本 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  install                         安装到 /usr/local/bin 并写入默认配置（需要 root）
+                                    同时安装 disk-usage 快捷命令
+  version                         显示版本、编译时间与 git commit
+  uninstall                       清理二进制、定时任务、MOTD 改动（需要 root）
+    -y, --yes                       跳过确认
+                                    保留 /var/log/disk-usage 与 /usr/local/lib/server-mgr
+
+  配置文件: /usr/local/lib/server-mgr/config.conf（磁盘警戒线、日志保留天数、
+            定时任务时间、不活跃天数阈值）
+
 ━━ 磁盘管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   disk                            列出磁盘挂载点及容量（过滤 snap/loop）
   disk usage                      各用户磁盘使用量，所有用户可用
@@ -60,14 +71,20 @@ func init() {
 ━━ MOTD 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   motd set                          启用实验室自定义 MOTD（需要 root）
                                       禁用系统默认脚本，安装自定义欢迎信息
-                                      自动配置公网 IP 定时缓存
+                                      并注入 VSCode Remote 终端的 MOTD 显示
   motd show                         预览当前 MOTD 输出
+  motd status                       检查脚本、注入、警告是否都到位
   motd reset                        恢复系统默认 MOTD（需要 root）
 
 ━━ Docker 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   docker check                      检测 Docker 安装状态
-  docker install                    安装 Docker（使用 BFSU 镜像，需要 root）
+  docker install                    安装 Docker（使用 BFSU 源，需要 root）
   docker perm                       查看各用户 Docker 权限
+  docker perm add <用户名>          授予用户免 sudo 使用 docker（需要 root）
+                                      注意：等价于授予 root 权限，需二次确认
+  docker perm del <用户名>          收回用户的 docker 权限（需要 root）
+  docker mirror set [镜像地址...]   配置镜像加速地址（需要 root）
+                                      不带参数则使用内置默认地址
 
 使用 "server-mgr <命令> --help" 查看具体命令的选项说明。
 `)

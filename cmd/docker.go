@@ -2,16 +2,91 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
+// dockerMirrorURL 是安装 docker-ce 软件包用的 apt 源，与拉镜像用的加速地址无关。
 const dockerMirrorURL = "https://mirrors.bfsu.edu.cn/docker-ce"
+
+const (
+	dockerGroupName        = "docker"
+	dockerDaemonConfigPath = "/etc/docker/daemon.json"
+	dockerDaemonBackupPath = "/etc/docker/daemon.json.bak"
+)
+
+// defaultDockerMirrorsRaw 是内置的镜像加速地址，多个用逗号分隔。
+// makefile 会通过 -ldflags -X 从 .env 的 DOCKER_MIRRORS 覆盖它，改地址不必动代码。
+//
+// 现状：国内公开镜像仓库大多已不可用，这里只内置一个确认可用的地址，
+// 后续确认新地址后追加到 .env 的 DOCKER_MIRRORS 即可。
+var defaultDockerMirrorsRaw = "https://docker.1ms.run"
+
+// parseMirrorList 解析逗号或空白分隔的镜像地址列表，去重并校验协议前缀。
+func parseMirrorList(raw string) ([]string, error) {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+
+	seen := make(map[string]struct{}, len(fields))
+	var mirrors []string
+	for _, f := range fields {
+		m := strings.TrimRight(strings.TrimSpace(f), "/")
+		if m == "" {
+			continue
+		}
+		if !strings.HasPrefix(m, "https://") && !strings.HasPrefix(m, "http://") {
+			return nil, fmt.Errorf("镜像地址必须以 http:// 或 https:// 开头: %s", f)
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		mirrors = append(mirrors, m)
+	}
+	if len(mirrors) == 0 {
+		return nil, fmt.Errorf("未提供有效的镜像地址")
+	}
+	return mirrors, nil
+}
+
+// mergeRegistryMirrors 把 registry-mirrors 写进已有的 daemon.json 内容，保留其余配置项。
+// 空内容视为空对象。注意：JSON 对象的键顺序在重新编码后按字母序排列，值不受影响。
+func mergeRegistryMirrors(existing []byte, mirrors []string) ([]byte, error) {
+	conf := map[string]any{}
+	if trimmed := bytes.TrimSpace(existing); len(trimmed) > 0 {
+		if err := json.Unmarshal(trimmed, &conf); err != nil {
+			return nil, fmt.Errorf("解析现有 %s 失败（请先修复或备份该文件）: %w", dockerDaemonConfigPath, err)
+		}
+	}
+	conf["registry-mirrors"] = mirrors
+
+	out, err := json.MarshalIndent(conf, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("生成配置失败: %w", err)
+	}
+	return append(out, '\n'), nil
+}
+
+// currentRegistryMirrors 从 daemon.json 内容中读出已配置的镜像地址，解析失败返回 nil。
+func currentRegistryMirrors(existing []byte) []string {
+	var conf struct {
+		Mirrors []string `json:"registry-mirrors"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(existing), &conf) != nil {
+		return nil
+	}
+	return conf.Mirrors
+}
 
 // dockerInstalled 检测 docker 命令是否存在
 func dockerInstalled() bool {
@@ -136,6 +211,9 @@ var dockerInstallCmd = &cobra.Command{
 var dockerPermCmd = &cobra.Command{
 	Use:   "perm",
 	Short: "查看各普通用户的 Docker 使用权限",
+	// 有子命令后必须显式 NoArgs：否则 "docker perm ad zhangsan" 这类拼错的子命令
+	// 会被当成参数忽略，静默列出权限表并以 0 退出，看起来像执行成功了
+	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		if !dockerInstalled() {
 			fmt.Fprintln(os.Stderr, "错误: Docker 未安装，请先运行 'sudo server-mgr docker install'")
@@ -195,10 +273,201 @@ var dockerPermCmd = &cobra.Command{
 			if _, ok := dockerMembers[u.name]; ok {
 				fmt.Fprintf(tw, "%s\t%s\t有权限\t已加入 docker 组\n", u.name, u.uid)
 			} else {
-				fmt.Fprintf(tw, "%s\t%s\t无权限\t可执行: usermod -aG docker %s\n", u.name, u.uid, u.name)
+				fmt.Fprintf(tw, "%s\t%s\t无权限\t可执行: sudo server-mgr docker perm add %s\n", u.name, u.uid, u.name)
 			}
 		}
 		tw.Flush()
+	},
+}
+
+// ── docker perm add / del ────────────────────────────────────────────────────
+
+// requireDockerInstalled 在 docker 未安装时退出。
+func requireDockerInstalled() {
+	if !dockerInstalled() {
+		fmt.Fprintln(os.Stderr, "错误: Docker 未安装，请先运行 'sudo server-mgr docker install'")
+		os.Exit(1)
+	}
+}
+
+// isDockerGroupMember 判断用户是否已在 docker 组内。
+func isDockerGroupMember(username string) bool {
+	members, err := dockerGroupMembers()
+	if err != nil {
+		return false
+	}
+	_, ok := members[username]
+	return ok
+}
+
+var dockerPermAddCmd = &cobra.Command{
+	Use:   "add <用户名>",
+	Short: "把用户加入 docker 组，使其免 sudo 使用 docker（需要 root）",
+	Long: `把用户加入 docker 组。
+
+注意：docker 组成员可以挂载宿主机任意目录到容器里以 root 身份读写，
+等价于把 root 权限交给该用户，只对可信用户开放。
+
+示例：
+  sudo server-mgr docker perm add zhangsan`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		requireRoot()
+		requireDockerInstalled()
+
+		username := args[0]
+		if _, err := user.Lookup(username); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 用户 %s 不存在\n", username)
+			os.Exit(1)
+		}
+
+		if isDockerGroupMember(username) {
+			fmt.Printf("用户 %s 已在 docker 组中，无需重复添加\n", username)
+			return
+		}
+
+		fmt.Printf("即将把用户 %s 加入 %s 组。\n", username, dockerGroupName)
+		fmt.Println(colorYellow + "⚠ docker 组成员可挂载宿主机任意目录并以 root 身份读写，等同于授予 root 权限。" + colorReset)
+		fmt.Print("确认授权? (y/N): ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+			fmt.Println("已取消")
+			return
+		}
+
+		if out, err := exec.Command("usermod", "-aG", dockerGroupName, username).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: usermod 失败: %v\n%s\n", err, out)
+			os.Exit(1)
+		}
+
+		fmt.Printf("用户 %s 已加入 docker 组\n", username)
+		fmt.Println("提示: 该用户需重新登录后才会生效（当前会话可执行 newgrp docker 临时生效）")
+	},
+}
+
+var dockerPermDelCmd = &cobra.Command{
+	Use:   "del <用户名>",
+	Short: "把用户移出 docker 组（需要 root）",
+	Long: `把用户移出 docker 组，收回免 sudo 使用 docker 的权限。
+
+示例：
+  sudo server-mgr docker perm del zhangsan`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		requireRoot()
+		requireDockerInstalled()
+
+		username := args[0]
+		if !isDockerGroupMember(username) {
+			fmt.Printf("用户 %s 不在 docker 组中，无需操作\n", username)
+			return
+		}
+
+		if out, err := exec.Command("gpasswd", "-d", username, dockerGroupName).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: gpasswd 失败: %v\n%s\n", err, out)
+			os.Exit(1)
+		}
+
+		fmt.Printf("用户 %s 已移出 docker 组\n", username)
+		fmt.Println("提示: 该用户已登录的会话仍持有旧的组身份，需重新登录后才彻底失效")
+	},
+}
+
+// ── docker mirror set ────────────────────────────────────────────────────────
+
+var dockerMirrorCmd = &cobra.Command{
+	Use:   "mirror",
+	Short: "Docker 镜像加速地址管理",
+}
+
+var dockerMirrorSetCmd = &cobra.Command{
+	Use:   "set [镜像地址...]",
+	Short: "配置 /etc/docker/daemon.json 的镜像加速地址（需要 root）",
+	Long: `写入 /etc/docker/daemon.json 的 registry-mirrors，daemon.json 中其他配置项保持不变。
+
+不带参数时使用内置默认地址（编译期可通过 .env 的 DOCKER_MIRRORS 覆盖）。
+
+示例：
+  sudo server-mgr docker mirror set
+  sudo server-mgr docker mirror set https://docker.1ms.run`,
+	Run: func(cmd *cobra.Command, args []string) {
+		requireRoot()
+
+		raw := defaultDockerMirrorsRaw
+		if len(args) > 0 {
+			raw = strings.Join(args, ",")
+		}
+		mirrors, err := parseMirrorList(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dockerDaemonConfigPath), 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 无法创建目录 %s: %v\n", filepath.Dir(dockerDaemonConfigPath), err)
+			os.Exit(1)
+		}
+
+		existing, err := os.ReadFile(dockerDaemonConfigPath)
+		if err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "错误: 无法读取 %s: %v\n", dockerDaemonConfigPath, err)
+			os.Exit(1)
+		}
+
+		if old := currentRegistryMirrors(existing); len(old) > 0 {
+			fmt.Printf("当前镜像地址: %s\n", strings.Join(old, ", "))
+		}
+
+		updated, err := mergeRegistryMirrors(existing, mirrors)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 已有配置先备份，改坏了可以还原
+		if len(existing) > 0 {
+			if err := os.WriteFile(dockerDaemonBackupPath, existing, 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "错误: 无法备份 %s: %v\n", dockerDaemonConfigPath, err)
+				os.Exit(1)
+			}
+			fmt.Printf("原配置已备份: %s\n", dockerDaemonBackupPath)
+		}
+
+		if err := os.WriteFile(dockerDaemonConfigPath, updated, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 无法写入 %s: %v\n", dockerDaemonConfigPath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("镜像地址已写入 %s：\n", dockerDaemonConfigPath)
+		for _, m := range mirrors {
+			fmt.Printf("  %s\n", m)
+		}
+
+		if !dockerInstalled() {
+			fmt.Println("\n提示: 当前未检测到 docker，配置将在安装后生效")
+			return
+		}
+
+		fmt.Println()
+		fmt.Println("需要重启 Docker 守护进程后配置才生效。")
+		fmt.Println(colorYellow + "⚠ 重启会中断正在运行的容器（带重启策略的容器会自动拉起）。" + colorReset)
+		fmt.Print("现在重启 Docker? (y/N): ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+			fmt.Println("已跳过。稍后可手动执行: sudo systemctl restart docker")
+			return
+		}
+
+		restart := exec.Command("systemctl", "restart", "docker")
+		restart.Stdout = os.Stdout
+		restart.Stderr = os.Stderr
+		if err := restart.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 重启 Docker 失败: %v\n", err)
+			fmt.Fprintln(os.Stderr, "可手动执行: sudo systemctl restart docker")
+			os.Exit(1)
+		}
+		fmt.Println("Docker 已重启。可执行 docker info 确认镜像地址已生效")
 	},
 }
 
@@ -206,10 +475,13 @@ var dockerPermCmd = &cobra.Command{
 
 var dockerCmd = &cobra.Command{
 	Use:   "docker",
-	Short: "Docker 管理（检测、安装、权限查看）",
+	Short: "Docker 管理（检测、安装、权限、镜像加速）",
 }
 
 func init() {
-	dockerCmd.AddCommand(dockerCheckCmd, dockerInstallCmd, dockerPermCmd)
+	dockerPermCmd.AddCommand(dockerPermAddCmd, dockerPermDelCmd)
+	dockerMirrorCmd.AddCommand(dockerMirrorSetCmd)
+
+	dockerCmd.AddCommand(dockerCheckCmd, dockerInstallCmd, dockerPermCmd, dockerMirrorCmd)
 	rootCmd.AddCommand(dockerCmd)
 }

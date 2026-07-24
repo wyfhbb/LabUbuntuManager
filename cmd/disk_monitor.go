@@ -15,9 +15,8 @@ import (
 
 const (
 	diskLogDir        = "/var/log/disk-usage"
-	diskCurrentReport = "/var/log/disk-usage/current-usage.txt"
-	diskScriptDir     = "/usr/local/lib/server-mgr"
-	diskScriptPath    = "/usr/local/lib/server-mgr/daily-disk-monitor.sh"
+	diskCurrentReport = diskLogDir + "/current-usage.txt"
+	diskScriptPath    = serverMgrLibDir + "/daily-disk-monitor.sh"
 	diskCronFile      = "/etc/cron.d/server-mgr-disk"
 	installedBinPath  = "/usr/local/bin/server-mgr"
 	diskUsageWrapper  = "/usr/local/bin/disk-usage"
@@ -29,10 +28,13 @@ const (
 //go:embed shell/daily-disk-monitor.sh
 var monitorScript string
 
-// cronContent 是写入 /etc/cron.d/ 的定时任务配置（/etc/cron.d 格式需含 user 字段）。
-var cronContent = "# server-mgr 磁盘用量每日统计任务\n" +
-	"# 由 server-mgr disk monitor enable 自动生成，请勿手动编辑\n" +
-	"0 1 * * * root /bin/bash " + diskScriptPath + " >> " + diskLogDir + "/cron.log 2>&1\n"
+// diskCronContent 生成写入 /etc/cron.d/ 的定时任务配置
+// （/etc/cron.d 格式需含 user 字段）。执行时间取自 config.conf。
+func diskCronContent(cfg serverMgrConfig) string {
+	return "# server-mgr 磁盘用量每日统计任务\n" +
+		"# 由 server-mgr disk monitor enable 自动生成，请勿手动编辑\n" +
+		cronExpr(cfg.DiskCronTime) + " root /bin/bash " + diskScriptPath + " >> " + diskLogDir + "/cron.log 2>&1\n"
+}
 
 // wrapperScript 写入 /usr/local/bin/disk-usage，供所有用户直接调用。
 var wrapperScript = "#!/bin/bash\n" +
@@ -67,20 +69,19 @@ var diskMonitorCmd = &cobra.Command{
 
 var diskMonitorEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "启用每日磁盘用量统计（每天 01:00 自动运行）",
+	Short: "启用每日磁盘用量统计（执行时间取自 config.conf，默认每天 01:00）",
 	Run: func(cmd *cobra.Command, args []string) {
-		if os.Getuid() != 0 {
-			fmt.Fprintln(os.Stderr, "错误: 此命令需要 root 权限，请使用 sudo 执行")
-			os.Exit(1)
-		}
+		requireRoot()
+
+		cfg := config()
 
 		// 1. 创建目录
 		if err := os.MkdirAll(diskLogDir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: 无法创建日志目录 %s: %v\n", diskLogDir, err)
 			os.Exit(1)
 		}
-		if err := os.MkdirAll(diskScriptDir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法创建脚本目录 %s: %v\n", diskScriptDir, err)
+		if err := os.MkdirAll(serverMgrLibDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 无法创建脚本目录 %s: %v\n", serverMgrLibDir, err)
 			os.Exit(1)
 		}
 
@@ -92,32 +93,34 @@ var diskMonitorEnableCmd = &cobra.Command{
 		fmt.Printf("监控脚本已写入: %s\n", diskScriptPath)
 
 		// 3. 写出 cron 配置
-		if err := os.WriteFile(diskCronFile, []byte(cronContent), 0644); err != nil {
+		if err := os.WriteFile(diskCronFile, []byte(diskCronContent(cfg)), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: 无法写入定时任务配置 %s: %v\n", diskCronFile, err)
 			os.Exit(1)
 		}
-		fmt.Printf("定时任务已配置: %s（每天 01:00 执行）\n", diskCronFile)
+		fmt.Printf("定时任务已配置: %s（每天 %s 执行）\n", diskCronFile, cronTimeDisplay(cfg.DiskCronTime))
 
 		// 4. 安装二进制到系统路径
-		execPath, err := os.Executable()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法获取当前二进制路径: %v\n", err)
+		if err := ensureInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
-		if err := copyFile(execPath, installedBinPath, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法安装二进制到 %s: %v\n", installedBinPath, err)
-			os.Exit(1)
-		}
-		fmt.Printf("二进制已安装: %s\n", installedBinPath)
 
 		// 5. 写出 disk-usage 快捷命令供所有用户使用
-		if err := os.WriteFile(diskUsageWrapper, []byte(wrapperScript), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法写入快捷命令 %s: %v\n", diskUsageWrapper, err)
+		if err := installDiskUsageWrapper(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("快捷命令已安装: %s\n", diskUsageWrapper)
 
-		// 6. 立即执行一次统计
+		// 6. 写出默认配置（缺失时）
+		if created, err := ensureConfigFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		} else if created {
+			fmt.Printf("默认配置已写入: %s\n", configFilePath)
+		}
+
+		// 7. 立即执行一次统计
 		fmt.Println("正在立即执行一次统计，请稍候...")
 		if err := runMonitorScript(); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: 首次统计执行失败: %v\n", err)
@@ -162,7 +165,7 @@ var diskMonitorStatusCmd = &cobra.Command{
 	Short: "查看每日磁盘用量统计定时任务状态",
 	Run: func(cmd *cobra.Command, args []string) {
 		if _, err := os.Stat(diskCronFile); err == nil {
-			fmt.Println("定时任务:  已启用（每天 01:00 自动执行）")
+			fmt.Printf("定时任务:  已启用（每天 %s 自动执行）\n", cronTimeDisplay(config().DiskCronTime))
 		} else {
 			fmt.Println("定时任务:  未启用")
 			fmt.Println("启用方法:  sudo server-mgr disk monitor enable")

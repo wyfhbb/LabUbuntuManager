@@ -7,7 +7,15 @@
 
 LOG_DIR="/var/log/disk-usage"
 REPORT_FILE="$LOG_DIR/current-usage.txt"
-MAX_LOGS=30
+
+# 日志保留天数取自统一配置文件（server-mgr install 生成），缺失时用默认值
+CONFIG_FILE="/usr/local/lib/server-mgr/config.conf"
+# shellcheck source=/dev/null
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+MAX_LOGS=${DISK_LOG_KEEP_DAYS:-30}
+case "$MAX_LOGS" in
+    ''|*[!0-9]*) MAX_LOGS=30 ;;
+esac
 
 mkdir -p "$LOG_DIR"
 

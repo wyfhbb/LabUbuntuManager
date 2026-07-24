@@ -89,13 +89,8 @@ var userInactiveWarnCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		// 未显式传 --days 时，默认值本身就来自 config.conf（见 init）
 		days := inactiveWarnDays
-		// 非命令行调用时（cron），从配置文件读取
-		if days == defaultInactiveDays {
-			if conf := readInactiveConf(); conf > 0 {
-				days = conf
-			}
-		}
 
 		users := collectInactiveUsers(days)
 		if len(users) == 0 {
@@ -248,10 +243,7 @@ var inactiveMonitorEnableCmd = &cobra.Command{
 示例：
   sudo server-mgr user inactive monitor enable --days 180`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if os.Getuid() != 0 {
-			fmt.Fprintln(os.Stderr, "错误: 此命令需要 root 权限，请使用 sudo 执行")
-			os.Exit(1)
-		}
+		requireRoot()
 
 		days := inactiveMonitorDays
 
@@ -261,35 +253,35 @@ var inactiveMonitorEnableCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// 2. 保存天数配置
-		if err := os.WriteFile(inactiveConfFile, []byte(fmt.Sprintf("%d\n", days)), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法写入配置文件 %s: %v\n", inactiveConfFile, err)
+		// 2. 保存天数配置（统一落在 config.conf，不再单独一个文件）
+		if _, err := ensureConfigFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("阈值已保存: %d 天 → %s\n", days, inactiveConfFile)
+		cfg := readConfigFile(configFilePath)
+		cfg.InactiveDays = days
+		if err := writeConfig(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("阈值已保存: %d 天 → %s\n", days, configFilePath)
 
 		// 3. 安装二进制到系统路径
-		execPath, err := os.Executable()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法获取当前二进制路径: %v\n", err)
+		if err := ensureInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 			os.Exit(1)
 		}
-		if err := copyFile(execPath, installedBinPath, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法安装二进制到 %s: %v\n", installedBinPath, err)
-			os.Exit(1)
-		}
-		fmt.Printf("二进制已安装: %s\n", installedBinPath)
 
-		// 4. 写入 cron 配置（每天 02:00 执行 warn）
-		cronContent := "# server-mgr 不活跃用户定时检查（每天 02:00）\n" +
+		// 4. 写入 cron 配置（执行时间取自 config.conf）
+		cronContent := "# server-mgr 不活跃用户定时检查（每天 " + cronTimeDisplay(cfg.InactiveCronTime) + "）\n" +
 			"# 由 server-mgr user inactive monitor enable 自动生成，请勿手动编辑\n" +
 			"LANG=C\n" +
-			"0 2 * * * root " + installedBinPath + " user inactive warn 2>/dev/null\n"
+			cronExpr(cfg.InactiveCronTime) + " root " + installedBinPath + " user inactive warn 2>/dev/null\n"
 		if err := os.WriteFile(inactiveCronFile, []byte(cronContent), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: 无法写入 cron 配置 %s: %v\n", inactiveCronFile, err)
 			os.Exit(1)
 		}
-		fmt.Printf("定时任务已配置: %s（每天 02:00 执行）\n", inactiveCronFile)
+		fmt.Printf("定时任务已配置: %s（每天 %s 执行）\n", inactiveCronFile, cronTimeDisplay(cfg.InactiveCronTime))
 
 		// 5. 立即执行一次检查
 		fmt.Print("正在执行首次检查... ")
@@ -331,7 +323,7 @@ var inactiveMonitorDisableCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		fmt.Println("定时任务已删除")
-		fmt.Printf("配置文件保留在 %s，如需清理请手动删除\n", inactiveConfFile)
+		fmt.Printf("配置文件保留在 %s，如需清理请手动删除\n", configFilePath)
 	},
 }
 
@@ -339,16 +331,16 @@ var inactiveMonitorStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "查看不活跃用户定时检查任务状态",
 	Run: func(cmd *cobra.Command, args []string) {
+		cfg := config()
+
 		if _, err := os.Stat(inactiveCronFile); err == nil {
-			fmt.Println("定时任务:  已启用（每天 02:00 自动检查）")
+			fmt.Printf("定时任务:  已启用（每天 %s 自动检查）\n", cronTimeDisplay(cfg.InactiveCronTime))
 		} else {
 			fmt.Println("定时任务:  未启用")
-			fmt.Println("启用方法:  sudo server-mgr user inactive monitor enable --days 180")
+			fmt.Printf("启用方法:  sudo server-mgr user inactive monitor enable --days %d\n", cfg.InactiveDays)
 		}
 
-		if conf := readInactiveConf(); conf > 0 {
-			fmt.Printf("阈值天数:  %d 天\n", conf)
-		}
+		fmt.Printf("阈值天数:  %d 天\n", cfg.InactiveDays)
 
 		if info, err := os.Stat(motdWarningsFile); err == nil {
 			data, _ := os.ReadFile(motdWarningsFile)
@@ -741,14 +733,21 @@ var userInactiveCmd = &cobra.Command{
 }
 
 func init() {
+	// 三个 flag 的默认值统一取自 config.conf 的 INACTIVE_DAYS，
+	// cron 里不带 --days 调用时拿到的就是管理员配置的阈值。
+	days := config().InactiveDays
+
 	// warn 命令的 flag
-	userInactiveWarnCmd.Flags().IntVar(&inactiveWarnDays, "days", defaultInactiveDays, "超过多少天未登录则写入警告（默认 180）")
+	userInactiveWarnCmd.Flags().IntVar(&inactiveWarnDays, "days", days,
+		fmt.Sprintf("超过多少天未登录则写入警告（默认 %d）", days))
 
 	// purge 命令的 flag
-	userInactivePurgeCmd.Flags().IntVar(&inactivePurgeDaysFlag, "days", defaultInactiveDays, "超过多少天未登录则删除（默认 180）")
+	userInactivePurgeCmd.Flags().IntVar(&inactivePurgeDaysFlag, "days", days,
+		fmt.Sprintf("超过多少天未登录则删除（默认 %d）", days))
 
 	// monitor enable 命令的 flag
-	inactiveMonitorEnableCmd.Flags().IntVar(&inactiveMonitorDays, "days", defaultInactiveDays, "不活跃阈值天数（默认 180）")
+	inactiveMonitorEnableCmd.Flags().IntVar(&inactiveMonitorDays, "days", days,
+		fmt.Sprintf("不活跃阈值天数（默认 %d）", days))
 
 	// 注册 monitor 子命令
 	inactiveMonitorCmd.AddCommand(inactiveMonitorEnableCmd)

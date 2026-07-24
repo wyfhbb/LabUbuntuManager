@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,9 @@ import (
 
 const bytesPerGB = 1024 * 1024 * 1024
 const bytesPerSector = 512
+
+// defaultDiskUsageWarnPercent 是磁盘使用率警戒线的出厂默认值，
+// 实际取值见 config.conf 的 DISK_WARN_PERCENT。
 const defaultDiskUsageWarnPercent = 80.0
 const gbPerTB = 1024.0
 const mbPerGB = 1024.0
@@ -48,8 +52,8 @@ type DiskUsage struct {
 // TotalGB 来自 /sys/block/<disk>/size（内核直接暴露的扇区数），
 // 为 0 表示读取失败（不影响分区容量展示）。
 type PhysicalDisk struct {
-	Name       string     // 物理盘路径，如 /dev/sda
-	TotalGB    float64    // 物理容量，0 表示未知
+	Name       string  // 物理盘路径，如 /dev/sda
+	TotalGB    float64 // 物理容量，0 表示未知
 	Partitions []DiskUsage
 }
 
@@ -133,41 +137,73 @@ func parseDiskUsageFromMounts(r io.Reader) ([]DiskUsage, error) {
 	return usages, nil
 }
 
-// physicalDiskName 从分区设备路径推断物理盘路径。
+// sysfsRoot 指向 sysfs 挂载点，测试时替换为夹具目录。
+var sysfsRoot = "/sys"
+
+// pStyleDiskPattern 匹配"整盘名 + 可选 p<数字> 分区后缀"的设备命名。
+// 这类盘名本身以数字结尾（nvme0n1、mmcblk0），不能靠"去掉末尾数字"来推断整盘。
+var pStyleDiskPattern = regexp.MustCompile(`^(nvme\d+n\d+|mmcblk\d+|loop\d+|md\d+|dm-\d+)(?:p\d+)?$`)
+
+// physicalDiskName 从设备路径推断其所属的物理盘路径。
 //
-// 规则：
-//   - sda1, sdb2   → /dev/sda, /dev/sdb
-//   - nvme0n1p1    → /dev/nvme0n1
-//   - mmcblk0p1    → /dev/mmcblk0
-//   - sda（整盘）  → /dev/sda（原样返回）
+//	sda1        → /dev/sda
+//	nvme0n1p1   → /dev/nvme0n1
+//	nvme0n1     → /dev/nvme0n1（整盘直接挂载，不分区）
+//	mmcblk0p1   → /dev/mmcblk0
+//
+// 以 sysfs 为准：/sys/block/<名字> 存在即整盘，分区目录下有 partition 文件、
+// 其父目录就是所属整盘。sysfs 查不到时（夹具、异构设备）回落到命名规则。
 func physicalDiskName(device string) string {
 	base := filepath.Base(device)
+	if name, ok := physicalDiskNameFromSysfs(base); ok {
+		return "/dev/" + name
+	}
+	return "/dev/" + physicalDiskBaseByPattern(base)
+}
 
-	// 先去掉末尾数字
+// physicalDiskNameFromSysfs 通过 sysfs 判断设备是整盘还是分区，信息不足时返回 false。
+func physicalDiskNameFromSysfs(base string) (string, bool) {
+	if _, err := os.Stat(filepath.Join(sysfsRoot, "block", base)); err == nil {
+		return base, true // /sys/block 下直接存在 → 本身就是整盘
+	}
+
+	devPath, err := filepath.EvalSymlinks(filepath.Join(sysfsRoot, "class", "block", base))
+	if err != nil {
+		return "", false
+	}
+	if _, err := os.Stat(filepath.Join(devPath, "partition")); err != nil {
+		return "", false // 不是分区，又不在 /sys/block 下，交给命名规则兜底
+	}
+
+	parent := filepath.Base(filepath.Dir(devPath))
+	if parent == "" || parent == "." || parent == string(filepath.Separator) {
+		return "", false
+	}
+	return parent, true
+}
+
+// physicalDiskBaseByPattern 按命名规则推断整盘名，是 sysfs 不可用时的兜底。
+func physicalDiskBaseByPattern(base string) string {
+	if m := pStyleDiskPattern.FindStringSubmatch(base); m != nil {
+		return m[1]
+	}
+
+	// sd/vd/hd/xvd 等：盘名不以数字结尾，去掉末尾数字即为整盘
 	i := len(base)
 	for i > 0 && base[i-1] >= '0' && base[i-1] <= '9' {
 		i--
 	}
-	stripped := base[:i]
-
-	// nvme/mmcblk 等命名：末尾为 'p' 且 'p' 前一位是数字，则再去掉 'p'
-	if len(stripped) > 1 &&
-		stripped[len(stripped)-1] == 'p' &&
-		stripped[len(stripped)-2] >= '0' && stripped[len(stripped)-2] <= '9' {
-		stripped = stripped[:len(stripped)-1]
+	if stripped := base[:i]; stripped != "" {
+		return stripped
 	}
-
-	if stripped == "" {
-		stripped = base // 解析失败则原样保留
-	}
-	return "/dev/" + stripped
+	return base // 解析失败则原样保留
 }
 
 // readPhysicalDiskSizeGB 从 /sys/block/<disk>/size 读取物理磁盘总容量（GB）。
 // 读取失败返回 0，不影响其他展示逻辑。
 func readPhysicalDiskSizeGB(physDev string) float64 {
 	diskName := filepath.Base(physDev)
-	data, err := os.ReadFile("/sys/block/" + diskName + "/size")
+	data, err := os.ReadFile(filepath.Join(sysfsRoot, "block", diskName, "size"))
 	if err != nil {
 		return 0
 	}
@@ -205,6 +241,8 @@ func groupByPhysicalDisk(usages []DiskUsage) []PhysicalDisk {
 }
 
 func renderPhysicalDisks(w io.Writer, disks []PhysicalDisk) error {
+	warnPercent := config().DiskWarnPercent
+
 	for i, disk := range disks {
 		// 物理盘标题行
 		if disk.TotalGB > 0 {
@@ -217,7 +255,7 @@ func renderPhysicalDisks(w io.Writer, disks []PhysicalDisk) error {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		for _, p := range disk.Partitions {
 			warn := ""
-			if p.UsedPercent > defaultDiskUsageWarnPercent {
+			if p.UsedPercent > warnPercent {
 				warn = " [!]"
 			}
 			fmt.Fprintf(tw, "  %s\t%s\t总 %s\t已用 %s\t剩 %s\t%.1f%%%s\n",
