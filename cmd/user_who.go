@@ -39,8 +39,37 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// parseWhoLoginTime 从 who 输出的时间字段起解析登录时刻，返回它占用了几个字段。
+//
+// who 的时间格式随 locale 变（coreutils 按 hard_locale(LC_TIME) 二选一）：
+//
+//	C / POSIX ：`Jul 25 18:46`      —— 三个字段，且不带年份
+//	其他 locale：`2026-07-25 18:46` —— 两个字段
+//
+// 两种都要认：cron、systemd 等环境里跑的就是 C locale，
+// 只认后者会把来源列显示成时间、时长显示成未知。
+func parseWhoLoginTime(fields []string, now time.Time) (time.Time, int, bool) {
+	if len(fields) >= 2 {
+		if t, err := time.ParseInLocation("2006-01-02 15:04", fields[0]+" "+fields[1], time.Local); err == nil {
+			return t, 2, true
+		}
+	}
+	if len(fields) >= 3 {
+		if t, err := time.ParseInLocation("Jan 2 15:04", strings.Join(fields[:3], " "), time.Local); err == nil {
+			// 该格式不带年份：按今年补，跨年时（12 月登录、1 月查看）回退一年
+			t = time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, time.Local)
+			if t.After(now.Add(24 * time.Hour)) {
+				t = t.AddDate(-1, 0, 0)
+			}
+			return t, 3, true
+		}
+	}
+	return time.Time{}, 0, false
+}
+
 // parseWhoSessions 解析 `who` 的输出为登录会话列表。
-// who 每行形如：`alice pts/0 2026-07-25 10:00 (192.168.1.5)`，末段来源可选。
+// who 每行形如：`alice pts/0 2026-07-25 10:00 (192.168.1.5)`，末段来源可选，
+// 时间部分的格式随 locale 变，见 parseWhoLoginTime。
 func parseWhoSessions(out string, now time.Time) []whoSession {
 	var sessions []whoSession
 	for _, line := range strings.Split(out, "\n") {
@@ -48,16 +77,19 @@ func parseWhoSessions(out string, now time.Time) []whoSession {
 		if len(fields) < 4 {
 			continue
 		}
-		user, tty, date, tm := fields[0], fields[1], fields[2], fields[3]
+		user, tty := fields[0], fields[1]
 
+		// 时间解析不出来时不再猜后面的字段：宁可来源留空，也不要把时间当成来源 IP
 		duration := time.Duration(-1)
-		if login, err := time.ParseInLocation("2006-01-02 15:04", date+" "+tm, time.Local); err == nil {
+		var rest []string
+		if login, used, ok := parseWhoLoginTime(fields[2:], now); ok {
 			duration = now.Sub(login)
+			rest = fields[2+used:]
 		}
 
 		host := ""
-		if len(fields) >= 5 {
-			host = strings.TrimSuffix(strings.TrimPrefix(fields[4], "("), ")")
+		if len(rest) > 0 {
+			host = strings.TrimSuffix(strings.TrimPrefix(rest[0], "("), ")")
 		}
 
 		s := whoSession{user: user, duration: duration, detail: tty}

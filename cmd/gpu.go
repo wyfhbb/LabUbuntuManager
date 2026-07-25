@@ -395,12 +395,30 @@ func (p *NvidiaSMIProvider) ListGPUProcesses() ([]GPUProcess, error) {
 //
 // --query-gpu 没有这一项，只能从 nvidia-smi -q 的 "键 : 值" 输出里取。
 // 只在 gpu status 里调用，不进 MOTD 渲染路径（-q 会 dump 全部信息，偏慢）。
+//
+// 键名随驱动变：610 起旧键 CUDA Version 被标记为弃用，值里直接跟着一句
+// "[Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]"，
+// CUDA 14.0 会把它删掉。所以先取新键，取不到再回落到旧键，两者都去掉弃用说明。
 func (p *NvidiaSMIProvider) CUDAVersion() string {
 	out, err := p.run("-q")
 	if err != nil {
 		return ""
 	}
-	return parseNvidiaSMIQueryField(out, "CUDA Version")
+	for _, key := range []string{"CUDA UMD Version", "CUDA Version"} {
+		if v := trimNvidiaSMINote(parseNvidiaSMIQueryField(out, key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// trimNvidiaSMINote 去掉 nvidia-smi 挂在值后面的方括号说明，
+// 例如 "13.3 [Deprecated; will be removed in CUDA 14.0. ...]" → "13.3"。
+func trimNvidiaSMINote(value string) string {
+	if i := strings.Index(value, " ["); i >= 0 {
+		value = value[:i]
+	}
+	return strings.TrimSpace(value)
 }
 
 // ── 解析（纯函数）─────────────────────────────────────────────────────────────

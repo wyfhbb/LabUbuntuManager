@@ -137,6 +137,35 @@ func TestParseNvidiaSMIQueryField(t *testing.T) {
 	if got := parseNvidiaSMIQueryField(out, "不存在的键"); got != "" {
 		t.Errorf("查不到的键应返回空串，得到 %q", got)
 	}
+
+	// 610 起旧键被标记弃用，值后面跟着一串说明；新键 CUDA UMD Version 是干净的。
+	// 键名精确匹配，"CUDA Version" 不能匹配到 "CUDA UMD Version" 那行。
+	newDriver := strings.Join([]string{
+		"Driver Version                : 610.43.02 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]",
+		"CUDA Version                  : 13.3 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]",
+		"CUDA UMD Version              : 13.3",
+	}, "\n")
+
+	if got := parseNvidiaSMIQueryField(newDriver, "CUDA Version"); !strings.HasPrefix(got, "13.3 [Deprecated") {
+		t.Errorf("旧键应原样取到含弃用说明的值，得到 %q", got)
+	}
+	if got := parseNvidiaSMIQueryField(newDriver, "CUDA UMD Version"); got != "13.3" {
+		t.Errorf("新键 CUDA UMD Version = %q，期望 13.3", got)
+	}
+}
+
+func TestTrimNvidiaSMINote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"13.3 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]", "13.3"},
+		{"610.43.02 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]", "610.43.02"},
+		{"12.4", "12.4"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := trimNvidiaSMINote(c.in); got != c.want {
+			t.Errorf("trimNvidiaSMINote(%q)=%q，期望 %q", c.in, got, c.want)
+		}
+	}
 }
 
 // ── 故障分类 ─────────────────────────────────────────────────────────────────
