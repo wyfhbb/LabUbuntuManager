@@ -1,11 +1,59 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// stubDiskProvider 模拟一个可能很慢、也可能出错的挂载点查询。
+type stubDiskProvider struct {
+	usages []DiskUsage
+	err    error
+	delay  time.Duration
+}
+
+func (s stubDiskProvider) ListDiskUsage() ([]DiskUsage, error) {
+	time.Sleep(s.delay)
+	return s.usages, s.err
+}
+
+// 坏掉的挂载点会让 statfs 永久阻塞。MOTD 每次登录都渲染，
+// 这里要保证的是"再慢也不等"，而不是把慢查询救回来。
+func TestListDiskUsageWithTimeout(t *testing.T) {
+	want := []DiskUsage{{Device: "/dev/sda1", MountPoint: "/"}}
+
+	got, timedOut := listDiskUsageWithTimeout(stubDiskProvider{usages: want}, time.Second)
+	if timedOut {
+		t.Error("正常查询不该报超时")
+	}
+	if len(got) != 1 || got[0].MountPoint != "/" {
+		t.Errorf("正常查询应原样返回结果，得到 %+v", got)
+	}
+
+	start := time.Now()
+	got, timedOut = listDiskUsageWithTimeout(
+		stubDiskProvider{usages: want, delay: 500 * time.Millisecond}, 30*time.Millisecond)
+	if !timedOut {
+		t.Error("卡住的查询应报超时")
+	}
+	if got != nil {
+		t.Errorf("超时时不应返回半截结果，得到 %+v", got)
+	}
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Errorf("超时后应立即返回，实际等了 %v", elapsed)
+	}
+
+	// 查询出错等同于没有挂载点：跳过磁盘段落，但不是超时
+	got, timedOut = listDiskUsageWithTimeout(
+		stubDiskProvider{err: errors.New("open /proc/mounts: 权限不足")}, time.Second)
+	if timedOut || got != nil {
+		t.Errorf("查询失败应返回 (nil, false)，得到 (%+v, %v)", got, timedOut)
+	}
+}
 
 func TestParseDiskUsageFromMountsFiltersAndFillsCapacity(t *testing.T) {
 	// 用临时目录当挂载点：statfs 对任意存在的路径都能取到所在文件系统的容量

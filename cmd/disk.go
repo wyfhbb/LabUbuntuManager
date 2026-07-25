@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -64,6 +65,40 @@ type PhysicalDisk struct {
 // DiskUsageProvider 定义磁盘占用查询接口。
 type DiskUsageProvider interface {
 	ListDiskUsage() ([]DiskUsage, error)
+}
+
+// motdDiskQueryTimeout 限制 MOTD 渲染时查分区用量的时间。
+//
+// 只用于登录路径。用户显式敲的 disk / disk usage 不设超时：那只拖住他自己，
+// 而且这种时候更想看到命令卡在哪，而不是被悄悄跳过。
+const motdDiskQueryTimeout = time.Second
+
+// listDiskUsageWithTimeout 在限定时间内查分区用量，超时返回 timedOut=true。
+//
+// 为什么需要它：statfs 在故障挂载点上会卡进不可中断的 D 状态 —— 掉盘后的
+// SCSI 重试、备份窗口里 fsfreeze 冻结的文件系统、失联的网络挂载都会触发。
+// syscall 本身取消不掉（context 也杀不动卡在内核态的调用），能做的只有"不再等它"：
+// 查询丢进 goroutine，超时就放弃磁盘段落继续把 MOTD 渲染完，
+// 不让一个坏挂载点拖住所有人登录。
+//
+// 放弃的 goroutine 会一直挂到 statfs 返回为止，但 MOTD 是一次性短进程，
+// 进程退出时随之消失；channel 带缓冲，保证它写完就能退出，不会泄漏。
+func listDiskUsageWithTimeout(p DiskUsageProvider, timeout time.Duration) (usages []DiskUsage, timedOut bool) {
+	done := make(chan []DiskUsage, 1)
+	go func() {
+		u, err := p.ListDiskUsage()
+		if err != nil {
+			u = nil // 查询失败与没有挂载点同等处理：跳过磁盘段落，不影响其他信息
+		}
+		done <- u
+	}()
+
+	select {
+	case u := <-done:
+		return u, false
+	case <-time.After(timeout):
+		return nil, true
+	}
 }
 
 // ProcMountDiskUsageProvider 基于 /proc/mounts 提供磁盘占用查询能力。

@@ -467,8 +467,10 @@ func renderMotd() {
 	}
 	fmt.Println()
 
-	// 分区用量只查一次，顶部告警和下面的明细共用
-	usages, _ := NewProcMountDiskUsageProvider().ListDiskUsage()
+	// 分区用量只查一次，顶部告警和下面的明细共用。
+	// 带超时：坏掉的挂载点会让 statfs 永久阻塞，而 MOTD 在每次登录时渲染，
+	// 卡住就是所有人都登不进来。宁可这次不显示磁盘信息，也不能拖住登录。
+	usages, diskTimedOut := listDiskUsageWithTimeout(NewProcMountDiskUsageProvider(), motdDiskQueryTimeout)
 
 	// 分区超警戒线：实时算，顶部醒目提示，不依赖每日统计
 	renderMotdDiskAlerts(os.Stdout, usages)
@@ -482,7 +484,11 @@ func renderMotd() {
 	fmt.Println()
 
 	// 磁盘用量
-	renderMotdDisks(usages)
+	if diskTimedOut {
+		renderDiskQueryTimeout(os.Stdout)
+	} else {
+		renderMotdDisks(usages)
+	}
 
 	// GPU 概览（无 N 卡的机器整段跳过）
 	renderMotdGPUs()
@@ -584,6 +590,15 @@ func renderMotdDisks(usages []DiskUsage) {
 		)
 	}
 	tw.Flush()
+}
+
+// renderDiskQueryTimeout 在分区用量查询超时时替代磁盘明细，说明为什么这段是空的。
+// 挂载点无响应本身就是故障信号，比"磁盘信息消失了"更值得让人看见。
+func renderDiskQueryTimeout(w io.Writer) {
+	fmt.Fprintf(w, "  %s%s⚠ 分区用量查询超过 %s 无响应，本次跳过%s\n",
+		colorRed, colorBold, motdDiskQueryTimeout, colorReset)
+	fmt.Fprintf(w, "  %s  可能有挂载点卡住（掉盘、文件系统冻结等），排查: df -h / dmesg | tail%s\n",
+		colorDim, colorReset)
 }
 
 func renderInitHints() {
