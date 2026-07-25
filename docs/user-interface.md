@@ -15,7 +15,7 @@
 | `user top` | 否 | 按用户聚合的 CPU/内存排行，标出长期占用大内存的进程 |
 
 写操作类子命令（`user add` / `del` / `passwd` / `inactive purge`）成功后会写入审计日志
-`/var/log/server-mgr/audit.log`，详见 [roadmap.md](./roadmap.md) 批次 5。
+`/var/log/server-mgr/audit.log`，实测记录见 [端到端实测报告](./e2e-report.md#审计-audit)。
 
 ---
 
