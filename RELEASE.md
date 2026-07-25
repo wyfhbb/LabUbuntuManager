@@ -108,8 +108,9 @@ sudo server-mgr notify config                  # 企业微信 / 邮件推送
 
 ## 🖥️ 系统要求
 
-- **Ubuntu 24.04**（`source` 换源依赖 24.04 的 DEB822 格式 `ubuntu.sources`；
-  其余命令对更早的版本同样适用）
+- **Ubuntu 24.04 及更高版本**（`source` 换源依赖 24.04 起启用的 DEB822 格式
+  `ubuntu.sources`，版本代号运行时读取，新版本无需改代码；其余命令对更早的版本同样适用）
+- x86 与 arm64 等非 x86 架构均可，换源时自动区分 `ubuntu` / `ubuntu-ports` 路径
 - 安装与写操作类命令需要 root；只读命令任意用户可用
 - 可选外部依赖：`cron`（定时任务）、`zsh`（zsh 注入，没装会自动跳过）、
   `docker`（docker 子命令）、`nvidia-smi`（GPU 子命令，没有 N 卡时整段优雅跳过）

@@ -3,8 +3,9 @@
 > 实验室服务器的"管家"：一条命令回答**谁把盘塞满了、谁占着显卡、谁还在线、谁半年没露面**，
 > 顺手把建用户、换源、装 Docker、配登录欢迎语这些重复劳动全收了。
 
-单个静态二进制，`scp` 过去就能跑，无运行时依赖。🐧 面向 Ubuntu 24.04
-（`source` 换源依赖 24.04 的 DEB822 源文件，其余命令对更早的版本也适用）。
+单个静态二进制，`scp` 过去就能跑，无运行时依赖。🐧 面向 Ubuntu 24.04 及更高版本
+（`source` 换源依赖 24.04 起启用的 DEB822 源文件，版本代号运行时从 `/etc/os-release`
+读取，新版本发布后无需改代码；其余命令对更早的版本也适用）。
 
 📊 **每条命令的真实输入输出**都在这里：[端到端实测报告](docs/e2e-report.md) ——
 所有输出都是真跑出来的，不是手写示例。
@@ -247,6 +248,10 @@ sudo vim /usr/local/lib/server-mgr/motd/header.txt   # 存盘即生效，不用�
 
 `source show` 认当前镜像站、`source set aliyun|tsinghua|ustc|bfsu|official` 换源
 （自动备份 + 跑 `apt-get update`）、`source restore` 一键还原。
+
+版本代号从 `/etc/os-release` 读，架构用 `dpkg --print-architecture` 认——
+非 x86 机器（arm64 等）自动改用镜像站的 `ubuntu-ports` 路径。`apt-get update`
+失败时（镜像站还没同步新版本之类）会自动回滚成换源前的内容，不会留下坏源。
 
 📖 [详细实测 →](docs/e2e-report.md#apt-源管理)
 
