@@ -186,16 +186,50 @@ Docker `daemon.json` 合并等。
 | 命令 | 权限 | 交互 | 断言要点 |
 |---|---|---|---|
 | `user list` | 任意 | — | 列出用户及数据目录映射 |
-| `user add <名>` | root | 全名 + y/N | 用户建成、家目录存在、每块数据盘上有 `<挂载点>/<用户名>`、家目录里有指向它的符号链接、GECOS 写入了全名；用户名含非法字符时拒绝；用户已存在时拒绝；确认输入 `n` 时不创建任何东西 |
+| `user add <名>` | root | 全名 + 密码×2 + y/N | 用户建成、家目录存在、每块数据盘上有 `<挂载点>/<用户名>`、家目录里有指向它的符号链接、GECOS 写入了全名；设置的初始密码可直接登录（**弱密码也接受**，如 `123`，且**不再强制首次登录改密**——`chage -l` 不应显示 password must be changed）；用户名含非法字符时拒绝；用户已存在时拒绝；两次密码不一致时只是重新提示、不创建任何东西；确认输入 `n` 时不创建任何东西；**家目录或某块数据盘上已存在同名目录时中止且绝不改动该目录** |
 | `user del <名>` | root | — | 用户消失，家目录**保留** |
 | `user del <名> --purge` | root | **无确认，直接删** | 家目录与各数据盘目录一并消失 |
-| `user passwd <名>` | root | 新密码×2 | 密码修改成功 |
+| `user passwd <名>` | root | 新密码×2 | 密码修改成功；成功后审计日志新增一条 `动作=user.passwd` |
+| `user who` | 任意 | — | 造一个登录会话（或直接喂假 `who` 输出）+ 一个 `.vscode-server` 进程，验证各出现一行：SSH 行含来源 IP 与登录时长、VSCode 行标"(推断)"；无任何会话时输出"当前没有登录会话" |
+| `user top` | 任意 | — | 造一个 RSS≥8GiB 且运行≥1天的进程，验证它出现在"长期占用大内存的进程"区；"按用户聚合"区按内存降序、进程数/CPU 合计正确；无大内存长跑进程时该区输出"本次没有符合条件的进程" |
 | `user inactive list` | root | — | 列出所有用户及未登录天数 |
 | `user inactive warn [--days N]` | root | — | 写 `warnings.d/20-inactive.txt`；无命中时该文件被删除 |
 | `user inactive purge --days N` | root | y/N | 输入 `n` 时不删任何用户；**只在自建测试用户上验证删除路径** |
 | `user inactive monitor enable [--days N]` | root | — | 写 `/etc/cron.d/server-mgr-inactive`；阈值存进 `config.conf` 的 `INACTIVE_DAYS`；立即执行一次检查 |
 | `user inactive monitor disable` | root | — | cron 文件消失，配置保留 |
 | `user inactive monitor status` | 任意 | — | 反映定时任务、阈值、告警状态 |
+
+**`user add` 的事务性必须单独重点测**（批次 4 的核心：中途失败不留半成品用户）：
+
+- **回滚干净**：人为制造某块数据盘上 `chown`/`mkdir` 失败（如把假数据盘 `mount -o remount,ro`），
+  执行 `user add`，验证失败后 `id <名>` 查不到、`/home/<名>` 不存在、**所有**数据盘上
+  都没有 `<挂载点>/<名>` 残留（包括失败发生前已建好的那几块）；stderr 明确说明"已回滚"
+- **回滚也失败**：构造回滚阶段无法清理的情形（如让某个已建工作目录变得删不掉），
+  验证 stderr **逐条列出**残留的具体路径和手动清理命令（`rm -rf ...` / `userdel -r ...`），
+  而不是静默退出
+- **不误删已存在目录**：预先在某块数据盘上放一个 `<挂载点>/<名>` 目录（内含一个哨兵文件），
+  再 `user add <名>`，验证命令在创建阶段就中止、该目录及哨兵文件**原样保留**、且未创建用户
+
+### 审计
+
+审计日志 `/var/log/server-mgr/audit.log`（0600，仅 root 可读）**只记录成功完成的写操作**。
+
+| 命令 | 权限 | 断言要点 |
+|---|---|---|
+| `audit` | root | 无记录时输出"暂无审计记录"；有记录时按时间顺序打印，每行 `时间 \| 执行者=… \| 动作=… \| 目标=… \| 详情=…` |
+| `audit --user <名>` | root | 只输出执行者或目标含该用户的行 |
+| `audit --since <时间>` | root | 只输出该时间之后的行；非法时间格式退出码非 0 |
+| 非 root 执行 `audit` | 普通用户 | 退出码非 0，提示需要 sudo（日志 0600 读不到） |
+
+**审计接入必须覆盖每条写操作**（成功后各产生一条记录，动作名固定）：
+
+- `user.add` / `user.del` / `user.del.purge` / `user.passwd` / `user.inactive.purge` /
+  `docker.perm.add` / `docker.perm.del` / `docker.mirror.set` / `source.set` /
+  `source.restore` / `motd.set` / `motd.reset` / `install` / `uninstall`
+- **释放空间要如实记录**：`user del --purge` 与 `user inactive purge` 造一个已知大小的目录，
+  验证审计详情里的"释放 X"与实际量级相符（`du -sb` 在删除前测得）
+- **只记成功**：制造一次会被回滚的 `user add`（见上文"回滚干净"），验证审计日志里**没有**新增记录
+- 日志文件权限必须是 `600`、属主 root；**`uninstall` 后审计日志按设计保留**（同 `/var/log/disk-usage`）
 
 ### APT 源
 
@@ -218,15 +252,33 @@ Docker `daemon.json` 合并等。
 | `docker perm del <名>` | root | — | 用户移出 docker 组 |
 | `docker mirror set` | root | 重启 y/N | 不带参数用内置默认地址；带参数用命令行地址；写入前备份 `daemon.json.bak`；**`daemon.json` 里已有的其他配置项必须原样保留**（造一个含 `data-root` 等键的文件来验证）；拒绝重启时打印手动命令 |
 
+### 主动告警（notify）
+
+推送要真发到外部，测试时**不要打真实 webhook / SMTP**：用假端点。
+起一个本地 HTTP 服务器当假企业微信 webhook（返回 `{"errcode":0,"errmsg":"ok"}`），
+或用假 SMTP（如 python `aiosmtpd`/`smtpd`）验证收到邮件。没有条件就 SKIP，不要打真实地址。
+
+| 命令 | 权限 | 交互 | 断言要点 |
+|---|---|---|---|
+| `notify config` | root | 各字段 + 密码 | 写出 `/usr/local/lib/server-mgr/notify.conf`，**权限必须 0600**；密钥不落进世界可读的 `config.conf`；回车保留旧值、输入 `-` 清空 |
+| `notify test` | root | — | 向配置的假端点各发一条；渠道成功打"已发送"、失败打原因并退出码非 0；未配置任何渠道时退出码非 0 |
+| `notify check` | root | — | 造一个超线分区（假 `/proc/mounts` 或真 tmpfs 撑满）→ 假 webhook 收到一条；**同一告警再跑一次 check 不应重复发送**（24h 静默窗口，验证去重状态文件 `notify/state` 生效）；未配置渠道时静默跳过、退出码 0 |
+| 每日统计脚本触发 | root | — | `bash daily-disk-monitor.sh` 跑完会调用 `notify check`（二进制不在时静默跳过） |
+
+去重与静默：改小 `NOTIFY_SILENCE_HOURS` 或直接改 `notify/state` 里的时间戳，
+验证过了窗口后同一告警会再次推送。
+
 ### 需要喂 stdin 的命令
 
 写脚本时统一用 here-string / here-doc 喂：
 
-- `user add <名>` → 全名，然后 `y`
+- `user add <名>` → 全名 → 初始密码 → 再次输入密码 → `y`（密码走隐藏输入，
+  用管道 / here-doc 喂时 `stty` 会自动降级为明文读取，不影响喂 stdin）
 - `user passwd <名>` → 新密码，两次
 - `user inactive purge` → `y` 或 `n`
 - `docker perm add <名>` → `y` 或 `n`
 - `docker mirror set` → 重启确认 `y` 或 `n`
+- `notify config` → 企业微信 webhook → SMTP 服务器（留空跳过邮件）→（启用邮件时）端口/账号/密码/发件人/收件人/加密方式 → 静默窗口小时数
 - `uninstall`（不带 `-y`）→ `y` 或 `n`
 
 每个带确认的命令都要**正反各测一次**：确认执行、拒绝不执行。
@@ -245,19 +297,22 @@ Docker `daemon.json` 合并等。
 /usr/local/lib/server-mgr/motd/warnings.d/{10-disk,20-inactive}.txt
 /usr/local/lib/server-mgr/motd/warnings.txt          # 旧版单文件，应被迁移掉
 /usr/local/lib/server-mgr/motd/init/{install,uninstall}-{miniforge,uv}.sh
+/usr/local/lib/server-mgr/notify.conf                # 告警推送配置（含密钥，0600），卸载后保留
+/usr/local/lib/server-mgr/notify/state               # 告警去重状态（0600），卸载后保留
 /etc/cron.d/server-mgr-disk
 /etc/cron.d/server-mgr-inactive
 /etc/cron.d/server-mgr-motd                          # 废弃，应被清理
 /etc/update-motd.d/99-lab-info
 /etc/bash.bashrc、/etc/zsh/zshrc                     # VSCode 注入片段
 /var/log/disk-usage/{current-usage.txt,disk-usage-*.log,cron.log}
+/var/log/server-mgr/audit.log                        # 写操作审计日志，0600，卸载后保留
 /var/cache/server-mgr/public-ip.txt                  # 废弃，应被清理
 /etc/docker/daemon.json{,.bak}
 /etc/apt/sources.list.d/ubuntu.sources{,.bak}
 ```
 
-`uninstall` 后除 `/var/log/disk-usage` 与 `/usr/local/lib/server-mgr`
-（**按设计保留**）之外，其余都不应存在。
+`uninstall` 后除 `/var/log/disk-usage`、`/var/log/server-mgr`（审计日志）与
+`/usr/local/lib/server-mgr`（**均按设计保留**）之外，其余都不应存在。
 
 ---
 

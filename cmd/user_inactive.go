@@ -166,6 +166,7 @@ var userInactivePurgeCmd = &cobra.Command{
 		deleted := 0
 		for _, u := range users {
 			fmt.Printf("\n正在删除用户 %s ... \n", u.username)
+			homeDir := filepath.Join("/home", u.username)
 
 			// 收集数据盘目录（在 userdel 之前）
 			var dataDirs []string
@@ -176,6 +177,9 @@ var userInactivePurgeCmd = &cobra.Command{
 				}
 			}
 
+			// 删除前量家目录大小（du 必须在删除前跑），只在删除成功后计入释放量
+			homeSize := dirSizeBytes(homeDir)
+
 			// 删除系统用户（-r 一并删家目录）
 			delCmd := exec.Command("userdel", "-r", u.username)
 			delCmd.Stdout = os.Stdout
@@ -184,16 +188,23 @@ var userInactivePurgeCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "错误: 删除用户 %s 失败: %v\n", u.username, err)
 				continue
 			}
+			freed := homeSize
 
 			// 清理各数据盘上的用户目录
 			for _, dir := range dataDirs {
+				sz := dirSizeBytes(dir)
 				fmt.Printf("  正在删除 %s ... ", dir)
 				if err := os.RemoveAll(dir); err != nil {
 					fmt.Fprintf(os.Stderr, "\n错误: 删除 %s 失败: %v\n", dir, err)
 					continue
 				}
 				fmt.Println("完成")
+				freed += sz
 			}
+
+			writeAudit("user.inactive.purge", u.username,
+				fmt.Sprintf("未登录 %d 天，释放 %s（家目录 + %d 个数据盘目录）",
+					u.daysSince, formatBytes(freed), len(dataDirs)))
 
 			fmt.Printf("用户 %s 已删除\n", u.username)
 			deleted++

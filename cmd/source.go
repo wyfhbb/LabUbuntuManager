@@ -201,6 +201,8 @@ var sourceSetCmd = &cobra.Command{
 		}
 		fmt.Printf("已切换至 %s（Ubuntu %s）\n\n", mirrorName, codename)
 
+		writeAudit("source.set", mirrorName, "codename="+codename)
+
 		fmt.Println("正在执行 apt-get update ...")
 		if err := runAptUpdate(); err != nil {
 			fmt.Fprintf(os.Stderr, "\napt-get update 失败: %v\n", err)
@@ -235,6 +237,8 @@ var sourceRestoreCmd = &cobra.Command{
 		}
 
 		fmt.Printf("已从 %s 还原\n\n", ubuntuSourcesBakPath)
+
+		writeAudit("source.restore", "-", "从 "+ubuntuSourcesBakPath+" 还原")
 
 		fmt.Println("正在执行 apt-get update ...")
 		if err := runAptUpdate(); err != nil {

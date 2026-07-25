@@ -48,13 +48,14 @@
 | 1 | GPU 管理 | `gpu status` / `gpu top` | 中 | 批次 0 | ✅ 已完成 |
 | 2 | 磁盘告警 | `disk warn` / 告警链路 | 中 | 批次 0 | ✅ 已完成 |
 | 3 | Docker 补全 | `docker perm add/del` / `docker mirror` | 小 | — （可随时插队）| ✅ 已完成 |
-| 4 | 修复 `user add` 无事务性 | —（无新命令） | 小 | 批次 0 | 待做 |
-| 5 | 运行时可见性与审计 | `user who` / `top` / 审计日志 | 中 | 批次 0 | 待做 |
-| 6 | 主动告警通道 | `notify` | 中 | 批次 1、2（均已完成） | 待做 |
+| 4 | 修复 `user add` 无事务性 | —（无新命令） | 小 | 批次 0 | ✅ 已完成 |
+| 5 | 运行时可见性与审计 | `user who` / `user top` / `audit` | 中 | 批次 0 | ✅ 已完成 |
+| 6 | 主动告警通道 | `notify` | 中 | 批次 1、2（均已完成） | ✅ 已完成 |
 
-**建议顺序：** 剩下 4 → 5 → 6，三者互不依赖，也可按需调整顺序。
+**全部批次已于 2026-07-25 完成。** 批次划分与顺序的原始规划见下文各节。
 批次 4 经 2026-07-25 审核后已从"用户生命周期"缩成单个 bug 修复，
-原计划的 lock/unlock、SSH 公钥管理、`--sudo`、批量创建全部取消，见文末"暂不列入"。
+原计划的 lock/unlock、SSH 公钥管理、`--sudo`、批量创建全部取消，见文末"暂不列入"，
+已于 2026-07-25 完成。
 
 ---
 
@@ -256,7 +257,25 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 
 ---
 
-## 批次 4 — 修复 `user add` 无事务性
+## 批次 4 — 修复 `user add` 无事务性 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- **改为"先收集校验全部输入，再改系统"**：把交互式密码输入从最后一步提前到
+  执行阶段之前。原设计里 `passwd` 是最后一步且交互，一旦管理员在这步失败
+  （两次密码不一致）就会留下已建好目录的半成品用户。现在全名、密码都在动手前收齐、
+  校验通过后才 `useradd` —— 密码输错只是重新提示，此时尚未触碰系统
+- **允许弱密码**：密码改用 `chpasswd`（以 root 运行，不经 PAM `pwquality`）设置，
+  故弱密码（如实验室常用的简单密码）可直接使用。密码收集只校验"非空 + 两次一致"，
+  不做强度限制
+- **去掉强制首次登录改密（`chage -d 0`）**：它与"弱密码可用"冲突——强制修改是用户
+  自己改、会走 `pwquality`，弱密码在首次登录时就会被拒。去掉后管理员设的密码直接长期生效
+- **隐藏密码输入用 `stty -echo/echo` 切换终端回显**，不引入 `golang.org/x/term`
+  新依赖；非 TTY（测试用管道喂 stdin）时自动降级为明文读取，不影响功能
+- **预检 + 回滚双重防误删**：家目录和各数据盘工作目录在动手前整体预检一遍，
+  任一已存在就中止且绝不改动它；执行阶段每次 `mkdir` 前再确认一次，只把本次真正
+  创建出来的目录纳入回滚清单。回滚逻辑抽成纯函数 `rollbackUserAdd`（删除动作注入以便单测），
+  逆序清理：先删数据盘工作目录，再 `userdel -r`；回滚本身失败则逐条列出残留路径和手动命令
 
 **2026-07-25 审核后大幅缩水：** 原计划的四项功能全部取消，只剩一个真实 bug 要修。
 取消的项与理由记在文末"暂不列入"，**不要再提议做这些**。
@@ -290,7 +309,30 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 
 ---
 
-## 批次 5 — 运行时可见性与审计
+## 批次 5 — 运行时可见性与审计 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- **命令命名 `user top`**（而非顶层 `top`）：与现有 `user list/add/inactive` 一脉相承，
+  也与已有的 `gpu top` 对称
+- **`user who` 的 VSCode Remote 走启发式推断**：登录会话解析 `who`（SSH 来源 IP、时长），
+  VSCode Remote 不是登录会话，靠扫描各用户的 `.vscode-server` 进程识别，标注"(推断)"，
+  取运行最久的进程代表会话起始。解析层 `parseWhoSessions` / `parseVscodeSessions` 为纯函数
+- **`user top` 的"长期占用大内存进程"用内置阈值**：RSS ≥ 8 GiB 且运行 ≥ 1 天
+  （常量 `bigMemRSSBytes` / `longRunSeconds`，未做成配置项，避免扩配置面；需要时再评估）。
+  聚合层 `aggregateUserProcesses` 为纯函数
+- **审计日志格式：分隔文本**（非 JSON，与"暂不做 --json"取向一致）：每行
+  `<RFC3339> | 执行者=<人> | 动作=<action> | 目标=<target> | 详情=<details>`，
+  竖线/换行在字段里会被清洗掉；`audit --user`（同时匹配执行者与目标）/ `--since` 过滤。
+  解析与过滤 `parseAuditLine` / `auditLineMatches` / `parseAuditSince` 为纯函数
+- **只记成功完成的写操作**：`writeAudit` 在各命令的成功点调用；被回滚的 `user add`
+  不产生记录（净变更为零）。写审计失败不阻断主流程（操作已成功），只打警告
+- **落盘 `/var/log/server-mgr/audit.log`**（目录 0700 / 文件 0600，按需创建）；
+  释放空间用 `du -sb` 在删除**之前**测得，写入 `user.del.purge` / `user.inactive.purge` 详情。
+  `uninstall` 不删该目录（同 `/var/log/disk-usage`，审计线索需长期保留）
+- 接入的 14 个动作名：`user.add`、`user.del`、`user.del.purge`、`user.passwd`、
+  `user.inactive.purge`、`docker.perm.add`、`docker.perm.del`、`docker.mirror.set`、
+  `source.set`、`source.restore`、`motd.set`、`motd.reset`、`install`、`uninstall`
 
 **为什么做：** 目前没有任何命令能回答"现在谁登录着、谁在跑什么、谁占了 200G 内存"。
 同时 `user del --purge` 和 `inactive purge` 是不可逆的批量删数据操作，当前零记录。
@@ -314,7 +356,28 @@ MOTD 已经渲染了磁盘用量，却不显示 GPU 空闲情况 —— 而后�
 
 ---
 
-## 批次 6 — 主动告警通道
+## 批次 6 — 主动告警通道 ✅ 已完成
+
+**落地时的决策（2026-07-25）**
+
+- **渠道：企业微信机器人 Webhook + SMTP 邮件**（不做钉钉）。两者都用 Go 标准库
+  （`net/http` / `net/smtp` / `crypto/tls`），无新依赖。SMTP 支持 `starttls`（587，默认）、
+  `ssl`（465 隐式 TLS，手动 `tls.Dial`）、`none`
+- **触发：挂到每日磁盘 cron**（不新增短间隔 cron）：`daily-disk-monitor.sh` 末尾在
+  `disk warn` 之后追加 `server-mgr notify check`，二进制不在或未配置渠道时静默跳过。
+  **代价：只每天推一次，达不到验收里"数分钟内收到推送"**——这是明确的取舍（换简单、不新增 cron）。
+  真要做到分钟级，后续把 `notify check` 单独挂一个短间隔 cron 即可，代码无需改
+- **告警源：分区使用率超线 + GPU 异常 + 需要重启**（首批不接单用户占用超线、不接 apt 安全更新）。
+  分区复用 `selectOverThresholdMounts`，GPU 复用 `asGPUFault`/`classifyGPUFailure`
+  （`gpuNoNvidiaHardware` 不算异常、不推），重启看 `/var/run/reboot-required`
+- **静默窗口默认 24h**（`NOTIFY_SILENCE_HOURS` 可改）：同一告警 key 在窗口内不重复推送。
+  去重状态落 `/usr/local/lib/server-mgr/notify/state`（0600，`key<TAB>unixts`），
+  只有推送成功才记入（失败下次重试）；超过窗口的条目在下次 check 时清掉，避免无限增长
+- **配置落 `notify.conf`（0600，含密钥）**，与世界可读的 `config.conf` 分开；`notify config`
+  交互式录入（密码走隐藏输入），不把密钥放进命令行参数。**未接入审计**（批次 5 的审计范围
+  是当时明确枚举的 14 项，notify 那时还不存在；如需审计 `notify.config` 可后续单列）
+- 纯函数：`parseNotifyConfig`/`formatNotifyConfig`、`parseNotifyState`/`formatNotifyState`、
+  `buildAlerts`、`filterSilenced`、`wechatPayload`、`buildEmailMessage` 均有单测
 
 **为什么做：** 所有通知目前都靠 MOTD 被动等用户登录。
 磁盘 95%、GPU 掉卡这类事故需要主动推送到管理员。

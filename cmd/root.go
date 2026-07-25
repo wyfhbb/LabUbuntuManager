@@ -70,6 +70,9 @@ func init() {
   user del <用户名>               删除用户
     --purge                         同时删除家目录及各数据盘目录
   user passwd <用户名>            修改用户密码
+  user who                        当前登录会话（SSH 来源 IP、时长，含推断的 VSCode Remote）
+  user top                        按用户聚合的 CPU/内存排行，标出长期占用大内存的进程
+                                    两条命令均无需 root，所有用户可用
   user inactive list              列出所有用户的未登录天数
   user inactive warn              将不活跃用户警告写入 MOTD（需要 root）
     --days 180                      超过多少天未登录则警告（默认 180）
@@ -87,6 +90,20 @@ func init() {
   motd show                         预览当前 MOTD 输出
   motd status                       检查脚本、注入、警告是否都到位
   motd reset                        恢复系统默认 MOTD（需要 root）
+
+━━ 主动告警 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  notify config                   配置推送渠道：企业微信 Webhook / SMTP 邮件（需要 root）
+  notify test                     发一条测试消息验证配置（需要 root）
+  notify check                    扫描分区使用率/GPU/需重启三源并去重推送（需要 root）
+                                    每日磁盘统计后自动触发；同一告警默认 24h 内不重复推送
+                                    配置落盘 /usr/local/lib/server-mgr/notify.conf（0600）
+
+━━ 审计 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  audit                           查看写操作审计日志（需要 root，日志 0600）
+    --user <名>                     只看涉及该用户（执行者或目标）的记录
+    --since <时间>                  只看该时间之后（如 2026-07-01 或 "2026-07-01 12:00:00"）
+                                    记录用户增删改、purge、换源、镜像、MOTD、安装卸载等
+                                    成功完成的写操作，落盘 /var/log/server-mgr/audit.log
 
 ━━ Docker 管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   docker check                      检测 Docker 安装状态

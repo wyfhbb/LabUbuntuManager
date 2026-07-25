@@ -166,6 +166,8 @@ var motdSetCmd = &cobra.Command{
 			fmt.Println("未检测到 zsh，跳过 zsh 注入")
 		}
 
+		writeAudit("motd.set", "-", "启用自定义 MOTD 并注入 VSCode 终端显示")
+
 		fmt.Println()
 		fmt.Println("MOTD 已启用。用户登录时将看到自定义欢迎信息。")
 		fmt.Printf("编辑欢迎语: %s\n", motdHeaderFile)
@@ -203,6 +205,8 @@ var motdResetCmd = &cobra.Command{
 		if restored > 0 {
 			fmt.Printf("已恢复 %d 个系统默认 MOTD 脚本\n", restored)
 		}
+
+		writeAudit("motd.reset", "-", "恢复系统默认 MOTD")
 
 		fmt.Println("已恢复系统默认 MOTD")
 		fmt.Printf("自定义数据保留在 %s，如需清理请手动删除\n", motdDataDir)

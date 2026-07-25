@@ -137,6 +137,8 @@ var installCmd = &cobra.Command{
 			fmt.Printf("配置已存在，保持不变: %s\n", configFilePath)
 		}
 
+		writeAudit("install", "-", fmt.Sprintf("version=%s commit=%s", buildVersion, buildCommit))
+
 		fmt.Println()
 		fmt.Printf("已安装版本: %s (commit %s, 编译于 %s)\n", buildVersion, buildCommit, buildTime)
 		fmt.Println()
@@ -243,6 +245,8 @@ var uninstallCmd = &cobra.Command{
 		} else if !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "警告: 无法删除 %s: %v\n", installedBinPath, err)
 		}
+
+		writeAudit("uninstall", "-", "清理二进制/cron/MOTD 注入，保留数据与配置")
 
 		fmt.Println()
 		fmt.Println("卸载完成。以下内容按设计保留，如需清理请手动删除：")

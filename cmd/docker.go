@@ -341,6 +341,8 @@ var dockerPermAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		writeAudit("docker.perm.add", username, "加入 docker 组（等价 root 权限）")
+
 		fmt.Printf("用户 %s 已加入 docker 组\n", username)
 		fmt.Println("提示: 该用户需重新登录后才会生效（当前会话可执行 newgrp docker 临时生效）")
 	},
@@ -368,6 +370,8 @@ var dockerPermDelCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "错误: gpasswd 失败: %v\n%s\n", err, out)
 			os.Exit(1)
 		}
+
+		writeAudit("docker.perm.del", username, "移出 docker 组")
 
 		fmt.Printf("用户 %s 已移出 docker 组\n", username)
 		fmt.Println("提示: 该用户已登录的会话仍持有旧的组身份，需重新登录后才彻底失效")
@@ -442,6 +446,8 @@ var dockerMirrorSetCmd = &cobra.Command{
 		for _, m := range mirrors {
 			fmt.Printf("  %s\n", m)
 		}
+
+		writeAudit("docker.mirror.set", "-", "registry-mirrors="+strings.Join(mirrors, ","))
 
 		if !dockerInstalled() {
 			fmt.Println("\n提示: 当前未检测到 docker，配置将在安装后生效")
