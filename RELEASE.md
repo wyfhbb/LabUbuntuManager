@@ -1,93 +1,120 @@
-# 🎉 server-mgr v1.0.0
+# 🔧 server-mgr v1.0.1
 
-实验室 Ubuntu 服务器管理 CLI 的**首个正式版**。
-一条命令回答"谁把盘塞满了、谁占着显卡、谁还在线、谁半年没露面"，
-把建用户、换源、装 Docker、配登录欢迎语这些重复劳动一并收掉。
+**修订版**，只动了 `source` 换源一处。起因是一个提问：换源命令是不是写死了
+Ubuntu 24.04、以后的版本还能不能用。
 
-单个静态二进制，`scp` 过去就能跑，无运行时依赖。
+结论是版本本身没问题——版本代号一直是运行时从 `/etc/os-release` 读的，
+26.04 上跑也不用改代码。但顺着查出四个真实缺陷，这一版把它们修掉了。
+
+其余模块（磁盘、GPU、用户、MOTD、告警、审计、Docker）**一行没动**，
+功能全集见 [v1.0.0 发版说明](docs/history/release100.md)。
 
 ---
 
-## 📦 拿到手怎么用
+## 🐛 这一版修了什么
 
-```bash
-# 1. 传到服务器
-scp -P <端口> server-mgr <用户>@<服务器>:~/
+### 1. 非 x86 架构会写出打不开的源 🔴
 
-# 2. 校验（可选）
-sha256sum server-mgr    # 应为下方"构建信息"里的值
+国内镜像站的 arm64 / ppc64el 包放在 `ubuntu-ports` 路径下，和 x86 的 `ubuntu`
+是两套目录。v1.0.0 的模板把 URI 写死成 `.../ubuntu`，在 ARM 机器上换完源
+`apt-get update` 必然 404 —— 实验室要是有 Jetson 或 GH200 就会踩到。
 
-# 3. 安装
-sudo ./server-mgr install
+现在用 `dpkg --print-architecture` 认架构（拿不到时回退到二进制自身的编译架构），
+除 amd64 / i386 外一律改用 `ubuntu-ports`；官方源在非 x86 上整体切到
+`ports.ubuntu.com/ubuntu-ports`（security 在 ports 上没有独立域名）。
+换源时会把认到的架构打出来：
 
-# 4. 按需开功能
-sudo server-mgr disk monitor enable            # 每天 01:00 统计各用户占用 + 超标告警
-sudo server-mgr motd set                       # 自定义登录欢迎信息（含 VSCode 终端）
-sudo server-mgr user inactive monitor enable   # 每天 02:00 检查长期不登录用户
-sudo server-mgr notify config                  # 企业微信 / 邮件推送
+```
+已切换至 清华大学（Ubuntu noble，架构 amd64）
 ```
 
-只想看不想装也行：`gpu status`、`disk`、`user who`、`user top`
-这些只读命令拷过去直接跑就有输出，不需要 root，不留任何文件。
+### 2. 换源失败会留下坏源 🔴
 
-卸载：`sudo server-mgr uninstall`（历史统计、审计日志、配置按设计保留）。
+新版本刚发布、镜像站还没同步时，写进去的源是打不开的。v1.0.0 在
+`apt-get update` 失败后直接退出，坏源原地保留，用户得自己想起来去
+`source restore`——在那之前这台机器装不了任何包。
+
+现在失败会自动回滚成换源前的内容，并明确告知：
+
+```
+apt-get update 失败: exit status 100
+已自动回滚 /etc/apt/sources.list.d/ubuntu.sources 至换源前的内容
+```
+
+回滚目标是**换源前**的内容而不是 `.bak`，所以连续换源时是退回上一步，
+不会意外把机器打回出厂源。
+
+### 3. 连续换源会冲掉出厂源备份 🟡
+
+v1.0.0 每次 `set` 都覆盖 `.bak`。换两次源之后，`.bak` 里存的其实是上一个镜像站，
+`restore` 就再也回不到出厂源了——但它还是照旧打印"已备份原始源"。
+
+现在 `.bak` 已存在就保留不覆盖，`restore` 始终指向真正的出厂源：
+
+```
+备份 /etc/apt/sources.list.d/ubuntu.sources.bak 已存在，保留不覆盖
+```
+
+### 4. 系统版本不符时的报错看不懂 🟢
+
+DEB822 格式是 Ubuntu 24.04 才启用的。在 22.04 上跑 `source show`，
+v1.0.0 丢出来的是一句裸的 `no such file or directory`。现在直接说清原因：
+
+```
+错误: 未找到 /etc/apt/sources.list.d/ubuntu.sources
+本命令依赖 Ubuntu 24.04 起启用的 DEB822 源格式；更早的版本用的是 /etc/apt/sources.list 单行格式，暂不支持
+```
+
+### 顺带
+
+- 审计日志补记架构，失败的换源也留痕（v1.0.0 只在成功时记，且没有架构信息）：
+  ```
+  动作=source.set | 目标=清华大学 | 详情=codename=noble arch=amd64
+  动作=source.set | 目标=阿里云   | 详情=失败并回滚，codename=nosuchrelease arch=amd64
+  ```
+- `source show` 认得出 `ports.ubuntu.com`，ARM 机上不再显示"未知"
+- 五份重复的 DEB822 模板收敛成一张镜像源表 + 单一模板，加镜像站现在只改一处数据
 
 ---
 
-## ✨ 这一版有什么
+## ⬆️ 怎么升级
 
-| 模块 | 命令 | 能干嘛 |
-|---|---|---|
-| 💾 **磁盘** | `disk` / `disk usage` / `disk warn` / `disk monitor` | 按物理盘分组看容量、各用户占用排行、超标点名进登录页、每日统计定时任务 |
-| 🎮 **GPU** | `gpu status` / `gpu top` | 每张卡的显存/利用率/温度/功耗，进程**按用户聚合**（谁占着哪张卡），驱动异常给出七类诊断 |
-| 👥 **用户** | `user list/add/del/passwd` / `who` / `top` / `inactive` | 建号自动开多盘工作目录+软链、中途失败自动回滚、谁在线（含 VSCode Remote）、谁吃内存、长期不登录清理 |
-| 👋 **MOTD** | `motd set/show/status/reset` | 登录欢迎信息，磁盘/GPU/告警一屏看清，VSCode 终端同样显示 |
-| 📣 **主动告警** | `notify config/test/check` | 分区超线、GPU 异常、需要重启三源推企业微信/邮箱，24h 去重 |
-| 📜 **审计** | `audit` | 所有成功写操作留痕：谁、何时、动了谁、释放多少 |
-| 🐳 **Docker** | `docker check/install/perm/mirror` | 装 Docker、收放免 sudo 权限（带 root 风险提示）、配镜像加速不破坏已有配置 |
-| 📦 **APT 源** | `source show/set/restore` | 五个国内镜像站一键切换，自动备份 |
+```bash
+scp -P <端口> server-mgr <用户>@<服务器>:~/
+sudo ./server-mgr install
+```
 
-完整功能介绍见 [README](README.md)，每条命令的真实输入输出见
-[端到端实测报告](docs/e2e-report.md)。
+幂等，配置文件（`config.conf`、`header.txt`、`notify.conf`）都不会被覆盖。
+**不需要重新配置任何东西**，定时任务、欢迎语、推送设置原样保留。
 
-### 几个值得单说的设计
+从 v1.0.0 升上来没有任何破坏性改动：命令、参数、输出格式、落盘路径全部不变，
+唯一的可见差异是 `source set` 成功时多打印一个架构字段。
 
-- 🛡️ **`user add` 是有事务性的**：先收齐并校验全部输入再动系统，
-  中途任何一步失败都会回滚干净（实测：数据盘挂只读，失败后账号、家目录、
-  各盘目录全无残留，审计里也不留记录）；已存在的同名目录一律不碰。
-- ⏱️ **登录路径上的实时查询都有护栏**：分区用量 1 秒、GPU 2 秒。
-  掉盘重试、`fsfreeze` 冻结、挂起的显卡驱动都不会把所有人挡在登录界面外。
-- 🩺 **`nvidia-smi` 的报错会被翻译成人话**：最经典的
-  `Driver/library version mismatch`（升级驱动后没重启）会直接给出结论、成因和处理步骤，
-  而不是丢一句 `exit status 255`。
-- 🧾 **审计记的是人不是 root**：执行者取 `SUDO_USER`，
-  `sudo server-mgr user del --purge` 记下的是管理员本人。
-- ♻️ **卸载不会把数据带走**：`/var/log/disk-usage`、`/var/log/server-mgr/audit.log`、
-  `/usr/local/lib/server-mgr`（含欢迎语与推送配置）全部保留。
+回滚：换回 v1.0.0 的二进制再 `install` 一次即可。
 
 ---
 
-## ✅ 这一版验证到什么程度
+## ✅ 验证到什么程度
 
 | 层面 | 覆盖 |
 |---|---|
-| 单元测试 | 93 个用例（含子测试）全绿，覆盖纯函数层：`/proc/mounts` 解析、物理盘名推断、配置读写往返、`nvidia-smi` CSV 解析与故障分类、`/proc/<pid>` 解析、报表解析、告警分文件读写与迁移、`daemon.json` 合并等 |
-| 端到端 | Docker 一次性容器里跑完**全部命令**（含交互式输入、错误分支、权限拒绝、`install → 用 → uninstall` 完整生命周期），模拟了 3 块物理硬盘 / 5 个挂载点 / `lastlog` / `utmp` / 需重启标记 |
-| 实机 | GPU 部分在 2×RTX 4090（驱动 610.43.02，CUDA 13.3）的实体服务器上验证：`gpu status`、`gpu top`（空闲态 + 两卡各一进程）、MOTD 段落、查询耗时 0.27 秒 |
+| 单元测试 | 97 个用例全绿（v1.0.0 为 93 个，本版新增 4 个测试函数）：架构分流 `usesPorts`、x86/ARM 两套 URI 渲染、codename 四处占位全部替换、镜像源表字段完整性 |
+| 端到端 | `./test/run-e2e.sh` 全量演练重跑一遍，退出码 0，换源全流程（show / set tsinghua / restore / 非法镜像名）与其余模块均无回归 |
+| 针对性验证 | 新增的三条分支在容器里逐条验证，13 项断言全通过：连续换源后 `.bak` 仍等于出厂源、伪造版本代号触发 `apt-get update` 失败后源文件按字节回到换源前、源文件缺失时的提示不再暴露 `no such file` |
 | 静态检查 | `gofmt -l .` 与 `go vet ./...` 无输出 |
-
-一条命令复现全部实测：`./test/run-e2e.sh`
 
 ### ⚠️ 已知边界
 
-- GPU 的**故障诊断分支**与"进程属主读不到"的情况只有桩验证——
-  在实机上验证要真把驱动弄坏，不值当
-- **邮件渠道**与 `docker install` 的**联网安装路径**尚未端到端实测
-- 告警推送挂在每日统计之后，默认**一天一次**；要分钟级就给 `notify check`
-  单挂一个短间隔 cron，代码不用改
-- `notify` 的分区告警正文里用量做了四舍五入（`已用 2/2 GB`），百分比是准的
-
-完整清单见[已知问题与待补测](docs/e2e-report.md#已知问题与待补测)。
+- **arm64 路径只验证到生成的源文件内容，没在真 ARM 机上实测**。
+  单测覆盖了 URI 分流和渲染结果，但"阿里云 ubuntu-ports 上确实有 noble 的包"
+  这件事是查文档确认的，不是跑出来的。手上有 ARM 机器的话，
+  `source set` 之后看一眼 `apt-get update` 就能确认。
+- `dpkg` 不可用时回退到二进制自身的编译架构。用 amd64 的二进制跑在
+  arm64 机器上（理论上不会发生，静态二进制跑不起来）会判断错。
+- [端到端实测报告](docs/e2e-report.md) 里 `source` 一节的输出仍是 v1.0.0 的，
+  少了架构字段和新增的两条分支，下次整体重录时再更新。
+- v1.0.0 的已知边界（GPU 故障诊断只有桩验证、邮件渠道未端到端实测等）
+  **全部继续适用**，本版没有涉及。
 
 ---
 
@@ -95,12 +122,12 @@ sudo server-mgr notify config                  # 企业微信 / 邮件推送
 
 | | |
 |---|---|
-| 版本 | `v1.0.0` |
-| commit | `6fdd91b` |
-| 构建时间 | 2026-07-26 00:17:21 |
+| 版本 | `v1.0.1` |
+| commit | `6d0d534` |
+| 构建时间 | 2026-07-26 00:33:55 |
 | 工具链 | go1.25.7，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0` |
-| 产物 | `server-mgr`，静态链接 ELF 64-bit，9.8 MiB（10,261,432 字节） |
-| SHA-256 | `f75f35a59f69f6acb93853cb0781875ca9c14ff7f6769ddcc3c1c67b1fe0efd6` |
+| 产物 | `server-mgr`，静态链接 ELF 64-bit，9.8 MiB（10,262,922 字节） |
+| SHA-256 | `c97e0bf4f7ce720566c8ce490682caed454603ea57a853ee235648c2a311626e` |
 
 自己编也一样：`make build`（版本号由 `git describe` 注入，无需改代码）。
 
@@ -109,20 +136,12 @@ sudo server-mgr notify config                  # 企业微信 / 邮件推送
 ## 🖥️ 系统要求
 
 - **Ubuntu 24.04 及更高版本**（`source` 换源依赖 24.04 起启用的 DEB822 格式
-  `ubuntu.sources`，版本代号运行时读取，新版本无需改代码；其余命令对更早的版本同样适用）
+  `ubuntu.sources`；版本代号运行时读取，新版本发布后无需改代码。
+  其余命令对更早的版本同样适用）
 - x86 与 arm64 等非 x86 架构均可，换源时自动区分 `ubuntu` / `ubuntu-ports` 路径
 - 安装与写操作类命令需要 root；只读命令任意用户可用
 - 可选外部依赖：`cron`（定时任务）、`zsh`（zsh 注入，没装会自动跳过）、
   `docker`（docker 子命令）、`nvidia-smi`（GPU 子命令，没有 N 卡时整段优雅跳过）
-
----
-
-## 🔄 升级与回滚
-
-- **升级**：把新二进制传上去跑 `sudo ./server-mgr install` 即可，幂等。
-  配置文件 `config.conf`、欢迎语 `header.txt`、推送配置 `notify.conf` **都不会被覆盖**
-- **回滚**：换回旧二进制再 `install` 一次；或 `sudo server-mgr uninstall` 后重装
-- 定时任务的时间点改在 `config.conf`，改完重新执行一次对应的 `enable`
 
 ---
 
@@ -135,3 +154,9 @@ sudo server-mgr notify config                  # 企业微信 / 邮件推送
 | [docs/disk-interface.md](docs/disk-interface.md) | 磁盘查询接口契约 |
 | [docs/user-interface.md](docs/user-interface.md) | 用户管理接口契约 |
 | [test/](test/) | Docker 端到端演练环境 |
+
+### 📁 历史版本
+
+| 版本 | 说明 |
+|---|---|
+| [v1.0.0](docs/history/release100.md) | 首个正式版：磁盘 / GPU / 用户 / MOTD / 告警 / 审计 / Docker / APT 源全部功能 |
