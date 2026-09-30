@@ -37,15 +37,13 @@ jobs:
           make build VERSION="$TAG" BUILD_TIME="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
           ./server-mgr version
 
+      # 文件名固定不带版本号，README 里的 releases/latest/download 链接才能一直指向最新版
       - name: package
         run: |
-          name="server-mgr_${TAG}_linux_amd64"
-          mkdir "$name"
-          cp server-mgr README.md "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cp server-mgr server-mgr-linux-amd64
+          sha256sum server-mgr-linux-amd64 > server-mgr-linux-amd64.sha256
 
       - name: upload
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" server-mgr_${TAG}_linux_amd64.tar.gz* --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" server-mgr-linux-amd64 server-mgr-linux-amd64.sha256 --clobber --repo "$GITHUB_REPOSITORY"

@@ -31,12 +31,21 @@
 
 ## 🚀 快速开始
 
+在服务器上直接下载最新版（linux/amd64）：
+
+```bash
+curl -fL -o server-mgr https://github.com/wyfhbb/LabUbuntuManager/releases/latest/download/server-mgr-linux-amd64
+chmod +x server-mgr
+```
+
+或者在开发机上自己编译再推过去：
+
 ```bash
 make build            # 开发机上编译（GOOS=linux 静态二进制，注入版本号）
 make deploy           # scp 到 .env 里配的 DEPLOY_SERVER
 ```
 
-到服务器上：
+然后在服务器上：
 
 ```bash
 sudo ./server-mgr install     # 唯一的安装入口：装二进制 + disk-usage 快捷命令 + 默认配置
