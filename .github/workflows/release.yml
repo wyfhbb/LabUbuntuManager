@@ -1,0 +1,51 @@
+name: release
+
+# 发布 Release 时自动编译 linux/amd64 二进制并挂到该 Release 上；
+# 也可在 Actions 页面手动触发，给已有的 tag（如 v1.0.0）补传。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要补传二进制的 Release tag，如 v1.0.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: test
+        run: go test ./...
+
+      - name: build
+        run: |
+          make build VERSION="$TAG" BUILD_TIME="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')"
+          ./server-mgr version
+
+      - name: package
+        run: |
+          name="server-mgr_${TAG}_linux_amd64"
+          mkdir "$name"
+          cp server-mgr README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" server-mgr_${TAG}_linux_amd64.tar.gz* --clobber --repo "$GITHUB_REPOSITORY"
